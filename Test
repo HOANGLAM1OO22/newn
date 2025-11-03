@@ -1,0 +1,125 @@
+private fun makeConverter(task: VideoTranscodingTask): Operator {
+    // Nếu chỉ copy buffer (chế độ debug)
+    if (SemSystemProperties.getBoolean("secmm.motionphoto.convert-to-copy", false)) {
+        return Operator { ibuf, obuf ->
+            val input = ibuf.getTypedData(HardwareBuffer::class.java)
+            val output = obuf.getTypedData(HardwareBuffer::class.java)
+            SLog.i(TAG, "convert-to-copy: w/h=${input.width}x${input.height}")
+            SharedBufferManager.copyHwBufferToHwBuffer(input, output)
+            obuf
+        }
+    }
+
+    /** STEP 1: xác định yêu cầu chuyển đổi **/
+    val rotationSrc = task.getRotation()
+    val rotationDst = task.getTranscodingRotation()
+    val needRotate = rotationSrc != rotationDst
+    val needSwap = ((rotationSrc - rotationDst + 360) % 180) != 0 // 90 hoặc 270 → swap w/h
+
+    // width/height sau khi tính theo rotation
+    val (srcWidth, srcHeight) = if (needSwap)
+        task.getVideoHeight() to task.getVideoWidth()
+    else
+        task.getVideoWidth() to task.getVideoHeight()
+
+    val dstWidth = task.getTranscodingVideoWidth()
+    val dstHeight = task.getTranscodingVideoHeight()
+    val dstRatio = dstWidth.toFloat() / dstHeight
+
+    val scaleW = dstWidth.toFloat() / srcWidth
+    val scaleH = dstHeight.toFloat() / srcHeight
+    val scale = maxOf(scaleW, scaleH)
+
+    val needResize = kotlin.math.abs(scale - 1f) > 0.01f
+    val needCrop = kotlin.math.abs((srcWidth.toFloat() / srcHeight) - dstRatio) > 0.01f
+
+    SLog.i(TAG, """makeConverter:
+        | src=${srcWidth}x${srcHeight} rot=$rotationSrc,
+        | dst=${dstWidth}x${dstHeight} rot=$rotationDst,
+        | swap=$needSwap, scale=$scale,
+        | needRotate=$needRotate, needResize=$needResize, needCrop=$needCrop
+    """.trimToOneLine())
+
+    /** STEP 2: build pipeline theo thứ tự chuẩn **/
+    val converters = mutableListOf<ImgpConverter>()
+
+    if (needRotate) converters += ImgpConverter(UniImgp.ofRotate())
+    if (needResize) converters += ImgpConverter(UniImgp.ofResize())
+    if (needCrop) converters += ImgpConverter(UniImgp.ofCrop())
+
+    /** STEP 3: build operator chain **/
+    return Operator { ibuf, obuf ->
+        var input = ibuf
+        var output = obuf
+
+        for ((index, imgpConverter) in converters.withIndex()) {
+            val isLast = index == converters.lastIndex
+
+            output = when (imgpConverter.imgpType) {
+                ImgpType.ROTATE -> {
+                    val newFormat = input.format.toMutableFormat().apply {
+                        val correctedRotation = getCorrectionRotation(rotationSrc, rotationDst)
+                        rotation = correctedRotation
+                        if (correctedRotation == 90 || correctedRotation == 270) {
+                            val oldW = cols
+                            cols = rows
+                            rows = oldW
+                        }
+                    }
+
+                    MediaBuffer.newImageAlloc().apply {
+                        setMediaFormat(newFormat)
+                        if (isLast && obuf.isNotEmpty) {
+                            setData(obuf.getData())
+                        } else {
+                            asSharable()
+                            setUsage(obuf.getTypedData(HardwareBuffer::class.java).usage)
+                        }
+                    }.allocateMutable()
+                }
+
+                ImgpType.RESIZE -> {
+                    MediaBuffer.newImageAlloc().apply {
+                        val newFormat = input.format.toMutableFormat().apply {
+                            cols = (cols * scale).roundToNearestEven()
+                            rows = (rows * scale).roundToNearestEven()
+                        }
+
+                        SLog.i(TAG, "resize newFormat=$newFormat")
+
+                        setMediaFormat(newFormat)
+                        if (isLast && obuf.isNotEmpty) {
+                            setData(obuf.getData())
+                        } else {
+                            asSharable()
+                            setUsage(obuf.getTypedData(HardwareBuffer::class.java).usage)
+                        }
+                    }.allocateMutable()
+                }
+
+                ImgpType.CROP -> {
+                    MediaBuffer.newImageAlloc().apply {
+                        val cropRect = computeCropRect(input.format, obuf.format)
+                        val newFormat = obuf.format.toMutableFormat().setCropRect(cropRect)
+                        SLog.i(TAG, "crop rect=$cropRect")
+
+                        setMediaFormat(newFormat)
+                        if (isLast && obuf.isNotEmpty) {
+                            setData(obuf.getData())
+                        } else {
+                            asSharable()
+                            setUsage(obuf.getTypedData(HardwareBuffer::class.java).usage)
+                        }
+                    }.allocateMutable()
+                }
+
+                else -> throw UnsupportedOperationException("Unsupported ImgpType: ${imgpConverter.imgpType}")
+            }
+
+            // Run native operator
+            input = imgpConverter.run(input, output)
+        }
+
+        output
+    }
+}
