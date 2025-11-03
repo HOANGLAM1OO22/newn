@@ -1,0 +1,237 @@
+private fun computeCropRect(inFormat: SumMediaFormat, outFormat: SumMediaFormat): Rect {
+    // ✅ Safe crop, tránh out of range
+    val w = outFormat.cols.coerceAtMost(inFormat.cols)
+    val h = outFormat.rows.coerceAtMost(inFormat.rows)
+    val x = ((inFormat.cols - w) / 2).coerceIn(0, inFormat.cols - w)
+    val y = ((inFormat.rows - h) / 2).coerceIn(0, inFormat.rows - h)
+
+    SLog.i(TAG, """computeCropRect:
+        | src w/h[${inFormat.cols}/${inFormat.rows}],
+        | dst w/h[${outFormat.cols}/${outFormat.rows}],
+        | crop x/y[$x/$y], w/h[$w/$h]
+    """.trimToOneLine())
+
+    return Rect(x, y, x + w, y + h)
+}
+
+
+private fun makeConverter(task: VideoTranscodingTask): Operator {
+    if (SemSystemProperties.getBoolean("secmm.motionphoto.convert-to-copy", false)) {
+        return Operator { ibuf, obuf ->
+            val input = ibuf.getTypedData(HardwareBuffer::class.java)
+            val output = obuf.getTypedData(HardwareBuffer::class.java)
+            SharedBufferManager.copyHwBufferToHwBuffer(input, output)
+            obuf
+        }
+    }
+
+    val srcRot = task.getRotation()
+    val dstRot = task.getTranscodingRotation()
+    val isRequiredToRotate = srcRot != dstRot
+
+    // ✅ xác định kích thước thật sau xoay
+    val (rotatedWidth, rotatedHeight) = if (srcRot % 180 != 0) {
+        task.getVideoHeight() to task.getVideoWidth()
+    } else {
+        task.getVideoWidth() to task.getVideoHeight()
+    }
+
+    // ✅ scale dựa theo kích thước sau khi xoay
+    val scale = maxOf(
+        task.getTranscodingVideoWidth().toFloat() / rotatedWidth,
+        task.getTranscodingVideoHeight().toFloat() / rotatedHeight
+    )
+
+    val isRequiredResize = scale != 1f
+    val isRequiredToCrop = (rotatedWidth.toFloat() / rotatedHeight) != task.getTranscodingVideoRatio()
+
+    SLog.i(TAG, """makeConverter:
+        | src ${task.getVideoWidth()}x${task.getVideoHeight()} rot=$srcRot
+        | rotated ${rotatedWidth}x${rotatedHeight}
+        | dst ${task.getTranscodingVideoWidth()}x${task.getTranscodingVideoHeight()} rot=$dstRot
+        | scale=$scale needRotate=$isRequiredToRotate needResize=$isRequiredResize needCrop=$isRequiredToCrop
+    """.trimToOneLine())
+
+    val converters = mutableListOf<ImgpConverter>()
+
+    // ✅ chọn thứ tự converter tùy theo rotation
+    if (srcRot == 90 || srcRot == 270) {
+        if (isRequiredToRotate) converters += ImgpConverter(UniImgp.ofRotate())
+        if (isRequiredResize) converters += ImgpConverter(UniImgp.ofResize())
+    } else {
+        if (isRequiredResize) converters += ImgpConverter(UniImgp.ofResize())
+        if (isRequiredToRotate) converters += ImgpConverter(UniImgp.ofRotate())
+    }
+    if (isRequiredToCrop) converters += ImgpConverter(UniImgp.ofCrop())
+
+    return Operator { ibuf, obuf ->
+        var input = ibuf
+        var output = obuf
+        var dumped = false
+
+        for (imgpConverter in converters) {
+            val isLast = imgpConverter == converters.last()
+
+            output = when (imgpConverter.imgpType) {
+                ImgpType.ROTATE -> {
+                    val rotate = getCorrectionRotation(srcRot, dstRot)
+                    val swapWH = rotate == 90 || rotate == 270
+
+                    SLog.i(TAG, "--- ROTATE --- $rotate° swapWH=$swapWH")
+
+                    MediaBuffer.newImageAlloc().apply {
+                        val newFormat = input.format.toMutableFormat().apply {
+                            if (swapWH) {
+                                cols = input.format.rows
+                                rows = input.format.cols
+                            } else {
+                                cols = input.format.cols
+                                rows = input.format.rows
+                            }
+                            setRotation(rotate)
+                        }
+                        setMediaFormat(newFormat)
+                        if (isLast && obuf.isNotEmpty) {
+                            setData(obuf.getData())
+                        } else {
+                            asSharable()
+                            setUsage(obuf.getTypedData(HardwareBuffer::class.java).usage)
+                        }
+                    }.allocateMutable()
+                }
+
+                ImgpType.RESIZE -> {
+                    SLog.i(TAG, "--- RESIZE --- scale=$scale")
+                    MediaBuffer.newImageAlloc().apply {
+                        val newFormat = input.format.toMutableFormat().apply {
+                            cols = (cols * scale).roundToNearestEven()
+                            rows = (rows * scale).roundToNearestEven()
+                        }
+                        setMediaFormat(newFormat)
+                        if (isLast && obuf.isNotEmpty) {
+                            setData(obuf.getData())
+                        } else {
+                            asSharable()
+                            setUsage(obuf.getTypedData(HardwareBuffer::class.java).usage)
+                        }
+                    }.allocateMutable()
+                }
+
+                ImgpType.CROP -> {
+                    SLog.i(TAG, "--- CROP ---")
+                    MediaBuffer.newImageAlloc().apply {
+                        val cropRect = computeCropRect(input.format, obuf.format)
+                        val newFormat = obuf.format.toMutableFormat().setCropRect(cropRect)
+                        setMediaFormat(newFormat)
+                        if (isLast && obuf.isNotEmpty) {
+                            setData(obuf.getData())
+                        } else {
+                            asSharable()
+                            setUsage(obuf.getTypedData(HardwareBuffer::class.java).usage)
+                        }
+                    }.allocateMutable()
+                }
+
+                else -> throw UnsupportedOperationException("Unsupported type: ${imgpConverter.imgpType}")
+            }
+
+            input = imgpConverter.run(input, output)
+
+            // dump để debug 1 lần
+            if (!dumped && task.path().contains("145219")) {
+                MediaBufferFileWriter("/sdcard/Download", "dump_${imgpConverter.imgpType.name.lowercase()}").write(input)
+                dumped = true
+            }
+        }
+
+        output
+    }
+}
+
+@OptIn(ExperimentalStdlibApi::class)
+private fun onDecodedImageAvailable(reader: ImageReader) {
+    try {
+        SLog.d(TAG, "onDecodedImageAvailable")
+        val srcImage = reader.acquireNextImage()
+        if (srcImage != null) {
+            val dstImage = imageWriter.dequeueInputImage()
+
+            SLog.i(TAG, """src:
+                | w/h[${srcImage.width}/${srcImage.height}], usg=0x${srcImage.hardwareBuffer?.usage?.toHexString()},
+                | dst:
+                | w/h[${dstImage.width}/${dstImage.height}], usg=0x${dstImage.hardwareBuffer?.usage?.toHexString()},
+            """.trimToOneLine())
+
+            measureTimeMillis {
+                converter.run(MediaBuffer.of(srcImage), MediaBuffer.of(dstImage))
+            }.also {
+                SLog.i(TAG, "conv ts: $it ms")
+            }
+
+            // ✅ FIX: chỉ set metadata sau khi converter hoàn tất
+            dstImage.timestamp = srcImage.timestamp
+            dstImage.dataSpace = srcImage.dataSpace
+
+            srcImage.close()
+            numProcessFrames++
+
+            SLog.d(TAG, "queueInputImage[$numProcessFrames]: ts=${dstImage.timestamp/1000} us")
+            imageWriter.queueInputImage(dstImage)
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+}
+
+private fun prepareEncoder(
+    task: VideoTranscodingTask,
+    extractor: MediaExtractor,
+    trackIndex: Int
+): MediaCodec {
+    SLog.i(TAG, "prepareEncoder E")
+    val format = task.getVideoCodecFormat()
+    val mimeType = format.getString(MediaFormat.KEY_MIME)!!
+    configVideoEncoderParameters(format, task)
+
+    SLog.i(TAG, "encoding-format: $format")
+
+    val encoder = MediaCodec.createEncoderByType(task.getVideoCodecType().value)
+
+    if (isUseEncoderCallback) {
+        val minLastTimestampUs = (0 until extractor.trackCount).minOfOrNull {
+            val mime = extractor.getTrackFormat(it).getString(MediaFormat.KEY_MIME)!!
+            task.mpFile.getDistinctLastTimestampUs(mime)
+        } ?: 0L
+
+        val videoEncoderCallback = VideoEncoderCallback.Builder()
+            .setEOSTimestampUs(minLastTimestampUs)
+            .setOnReachedEOS {
+                task.addSamples(format.getString(MediaFormat.KEY_MIME)!!, it.toList())
+                countingLatch.down()
+                this@VideoTranscoder.eventListener?.onTranscodingComplete(task.mpFile)
+            }.setOnEachFrameDone {
+                this@VideoTranscoder.eventListener?.onEachFrameTranscoded(task.mpFile, mimeType, it)
+            }.build()
+
+        sendEOSHint = videoEncoderCallback::setEOSHint
+        encoder.setCallback(videoEncoderCallback)
+    }
+
+    // ⚠️ Nếu pipeline đã xoay thật, KHÔNG set rotation metadata
+    // format.setInteger(MediaFormat.KEY_ROTATION, task.getTranscodingRotation())
+
+    encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+
+    // ✅ Giữ lại surface riêng để pass xuống SharedBufferManager
+    val encoderSurface = encoder.createInputSurface()
+    imageWriter = ImageWriter.newInstance(encoderSurface, MAX_TRANSCODING_IMAGES)
+
+    // ✅ Bỏ dòng cũ (imageWriter.surface)
+    SharedBufferManager.setSurfaceAsDroppable(encoderSurface, false)
+
+    SLog.i(TAG, "prepareEncoder X")
+    return encoder
+}
+
+
+
