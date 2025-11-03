@@ -1,0 +1,277 @@
+OK ✅ — Dưới đây là **phiên bản full code** cho **Cách A (Bake rotation vào pixel, không dùng metadata rotation)**,
+được viết lại **hoàn chỉnh cho hàm `makeConverter()` và block `ImgpType.ROTATE`** trong `VideoTranscoder`.
+
+> 🎯 Mục tiêu:
+>
+> * Native không còn thấy rows/cols = 1312×1312
+> * Không có rotation attribute trong `MediaBuffer.format`
+> * Encoder được config đúng width/height sau xoay, rotation=0
+> * Output pixel thực sự đã được xoay (pixel-rotated)
+
+---
+
+### ✅ `makeConverter()` (Full, đã chỉnh đúng theo Cách A)
+
+```kotlin
+private fun makeConverter(task: VideoTranscodingTask): Operator {
+    if (SemSystemProperties.getBoolean("secmm.motionphoto.convert-to-copy", false)) {
+        return Operator { ibuf, obuf ->
+            val input = ibuf.getTypedData(HardwareBuffer::class.java)
+            val output = obuf.getTypedData(HardwareBuffer::class.java)
+            SharedBufferManager.copyHwBufferToHwBuffer(input, output)
+            obuf
+        }
+    }
+
+    val srcRot = task.getRotation()
+    val dstRot = task.getTranscodingRotation()
+    val isRequiredToRotate = srcRot != dstRot
+
+    // 1️⃣ Tính kích thước sau khi xoay
+    val (rotatedWidth, rotatedHeight) = if (srcRot % 180 != 0) {
+        task.getVideoHeight() to task.getVideoWidth()
+    } else {
+        task.getVideoWidth() to task.getVideoHeight()
+    }
+
+    // 2️⃣ Tính scale và crop
+    val scale = maxOf(
+        task.getTranscodingVideoWidth().toFloat() / rotatedWidth,
+        task.getTranscodingVideoHeight().toFloat() / rotatedHeight
+    )
+
+    val isRequiredResize = scale != 1f
+    val isRequiredToCrop =
+        (rotatedWidth.toFloat() / rotatedHeight) != task.getTranscodingVideoRatio()
+
+    SLog.i(TAG, """makeConverter:
+        | src: ${task.getVideoWidth()}x${task.getVideoHeight()}, rot=$srcRot
+        | rotated: ${rotatedWidth}x${rotatedHeight}
+        | dst: ${task.getTranscodingVideoWidth()}x${task.getTranscodingVideoHeight()}, rot=$dstRot
+        | scale=$scale, needRotate=$isRequiredToRotate, needResize=$isRequiredResize, needCrop=$isRequiredToCrop
+    """.trimToOneLine())
+
+    val converters = mutableListOf<ImgpConverter>()
+
+    // 3️⃣ Sắp xếp thứ tự filter hợp lý (xoay pixel thật)
+    if (srcRot == 90 || srcRot == 270) {
+        if (isRequiredResize) converters += ImgpConverter(UniImgp.ofResize())
+        if (isRequiredToRotate) converters += ImgpConverter(UniImgp.ofRotate())
+    } else {
+        if (isRequiredToRotate) converters += ImgpConverter(UniImgp.ofRotate())
+        if (isRequiredResize) converters += ImgpConverter(UniImgp.ofResize())
+    }
+    if (isRequiredToCrop) converters += ImgpConverter(UniImgp.ofCrop())
+
+    // 4️⃣ Chuỗi Operator
+    return Operator { ibuf, obuf ->
+        var input = ibuf
+        var output = obuf
+
+        for (imgpConverter in converters) {
+            val isLast = imgpConverter == converters.last()
+
+            output = when (imgpConverter.imgpType) {
+
+                ImgpType.ROTATE -> {
+                    SLog.i(TAG, "--- ROTATE ---")
+
+                    val correction = getCorrectionRotation(srcRot, dstRot) // e.g. 180->90
+                    MediaBuffer.newImageAlloc().apply {
+                        // 🔥 Dùng kích thước sau xoay: swap width/height
+                        val newFormat = input.format
+                            .toMutableFormat()
+                            .setCols(input.format.rows) // swap
+                            .setRows(input.format.cols)
+                            .clearRotation() // custom ext: remove rotation attr completely
+
+                        setMediaFormat(newFormat)
+
+                        if (isLast && obuf.isNotEmpty) {
+                            setData(obuf.getData())
+                        } else {
+                            asSharable()
+                            setUsage(obuf.getTypedData(HardwareBuffer::class.java).usage)
+                        }
+                    }.allocateMutable().also { outBuf ->
+                        // Truyền góc xoay cho plugin, không qua attributes
+                        (imgpConverter as ImgpConverter).imgp.setRotationDegrees(correction)
+                    }
+                }
+
+                ImgpType.RESIZE -> {
+                    SLog.i(TAG, "--- RESIZE ---")
+                    MediaBuffer.newImageAlloc().apply {
+                        val newFormat = input.format.toMutableFormat().apply {
+                            cols = (cols * scale).roundToNearestEven()
+                            rows = (rows * scale).roundToNearestEven()
+                        }.clearRotation()
+
+                        setMediaFormat(newFormat)
+
+                        if (isLast && obuf.isNotEmpty) setData(obuf.getData())
+                        else {
+                            asSharable()
+                            setUsage(obuf.getTypedData(HardwareBuffer::class.java).usage)
+                        }
+                    }.allocateMutable()
+                }
+
+                ImgpType.CROP -> {
+                    SLog.i(TAG, "--- CROP ---")
+                    MediaBuffer.newImageAlloc().apply {
+                        val cropRect = computeCropRect(input.format, obuf.format)
+                        val newFormat = obuf.format
+                            .toMutableFormat()
+                            .setCropRect(cropRect)
+                            .clearRotation()
+
+                        setMediaFormat(newFormat)
+
+                        if (isLast && obuf.isNotEmpty) setData(obuf.getData())
+                        else {
+                            asSharable()
+                            setUsage(obuf.getTypedData(HardwareBuffer::class.java).usage)
+                        }
+                    }.allocateMutable()
+                }
+
+                else -> throw UnsupportedOperationException(
+                    "Unsupported imgpType=${imgpConverter.imgpType}"
+                )
+            }
+
+            try {
+                input = imgpConverter.run(input, output)
+            } catch (e: Exception) {
+                SLog.e(TAG, "error during converting: ${e.message}, imgpType=${imgpConverter.imgpType}")
+                e.printStackTrace()
+            }
+        }
+        output
+    }
+}
+```
+
+---
+
+### ✅ Thêm tiện ích mở rộng: `clearRotation()` cho `MediaFormat`
+
+Thêm extension này trong cùng file hoặc file utils:
+
+```kotlin
+fun MutableMediaFormat.clearRotation(): MutableMediaFormat {
+    if (has("rotation")) {
+        remove("rotation")
+    }
+    return this
+}
+```
+
+---
+
+### ✅ Trong `configVideoEncoderParameters()`, ép encoder width/height theo sau xoay
+
+Thay đổi như sau:
+
+```kotlin
+private fun configVideoEncoderParameters(format: MediaFormat, task: VideoTranscodingTask) {
+    val srcRot = task.getRotation()
+    val dstRot = task.getTranscodingRotation()
+    val willBakeRotation = srcRot != dstRot
+
+    val (rotatedW, rotatedH) = if (srcRot % 180 != 0) {
+        task.getVideoHeight() to task.getVideoWidth()
+    } else {
+        task.getVideoWidth() to task.getVideoHeight()
+    }
+
+    if (willBakeRotation) {
+        // Pixel đã xoay → encoder phải config theo kích thước sau xoay
+        format.setInteger(MediaFormat.KEY_WIDTH, rotatedW)
+        format.setInteger(MediaFormat.KEY_HEIGHT, rotatedH)
+        format.setInteger(MediaFormat.KEY_ROTATION, 0)
+    } else {
+        // Không cần xoay
+        format.setInteger(MediaFormat.KEY_WIDTH, task.getTranscodingVideoWidth())
+        format.setInteger(MediaFormat.KEY_HEIGHT, task.getTranscodingVideoHeight())
+        format.setInteger(MediaFormat.KEY_ROTATION, dstRot)
+    }
+
+    format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
+    format.setFloat(MediaFormat.KEY_I_FRAME_INTERVAL, 0.5f)
+    format.setInteger(MediaFormat.KEY_BIT_RATE, 10000000)
+    format.setInteger(MediaFormat.KEY_PRIORITY, TRANSCODE_CODEC_PRIORITY)
+
+    // vendor flags
+    format.setInteger("vendor.qti-ext-enc-content-adaptive-mode.value", 1)
+    format.setInteger("vendor.qti-ext-enc-linear-color-format.value", 1)
+}
+```
+
+---
+
+### ✅ Trong `prepareEncoder()`, gọi như sau:
+
+```kotlin
+val format = task.getTranscodingVideoCodecFormat()
+configVideoEncoderParameters(format, task) // sẽ tự detect baked rotation
+```
+
+---
+
+### ✅ Trong `ImgpFilterAdapter` (nếu bạn có quyền sửa):
+
+Thêm method mới để truyền góc xoay **thay vì đọc từ attributes**:
+
+```kotlin
+class ImgpFilterAdapter {
+    private var rotateDegrees: Int = 0
+
+    fun setRotationDegrees(degrees: Int) {
+        this.rotateDegrees = degrees
+    }
+
+    fun run(input: MediaBuffer, output: MutableMediaBuffer): MutableMediaBuffer {
+        // native gọi plugin.rotate(rotateDegrees, input, output)
+        return nativeRunRotate(input, output, rotateDegrees)
+    }
+}
+```
+
+---
+
+### ✅ Kết quả mong đợi log Native
+
+Sau khi fix, log của bạn sẽ chuyển từ:
+
+```
+shape=batch/rows/cols=[1 1312 1312 1]
+```
+
+👉 sang:
+
+```
+ibuf: shape=batch/rows/cols=[1 1312 1752 1]
+obuf: shape=batch/rows/cols=[1 1752 1312 1]
+(no rotation attribute)
+stride=1752, scanline=1312
+```
+
+và OpenCV log:
+
+```
+rotate_num=90
+inputPlaneMat: 1312x1752
+outputPlaneMat: 1752x1312
+```
+
+---
+
+Nếu bạn muốn, tôi có thể gửi thêm:
+
+* ✅ **diff dạng commit git** (để áp thẳng vào branch)
+* ✅ **log verify expected**
+* ✅ **phiên bản native C++ check rotation clean**
+
+Bạn có muốn tôi tạo luôn commit patch dạng diff cho branch `dev/huong` không?
