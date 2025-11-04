@@ -1,0 +1,133 @@
+private fun makeConverter(task: VideoTranscodingTask): Operator {
+    if (SemSystemProperties.getBoolean("secmm.motionphoto.convert-to-copy", false)) {
+        return Operator { ibuf, obuf ->
+            val input = ibuf.getTypedData(HardwareBuffer::class.java)
+            val output = obuf.getTypedData(HardwareBuffer::class.java)
+            SharedBufferManager.copyHwBufferToHwBuffer(input, output)
+            obuf
+        }
+    }
+
+    val srcRot = task.getRotation()
+    val dstRot = task.getTranscodingRotation()
+    val corrRot = getCorrectionRotation(srcRot, dstRot)   // 0/90/180/270
+    val needRotate = corrRot != 0
+
+    // Lấy kích thước thực của khung decoder (theo hardware buffer), trước khi xoay
+    // Lưu ý: chiều này chính là decoder output (surface) size, không tin cậy input.format
+    val srcW0 = task.getVideoWidth()
+    val srcH0 = task.getVideoHeight()
+
+    // Kích thước sau khi áp dụng rotation hiệu chỉnh
+    val (srcWAfterRot, srcHAfterRot) = when (corrRot) {
+        90, 270 -> srcH0 to srcW0
+        else    -> srcW0 to srcH0
+    }
+
+    // Target encoder
+    val dstW = task.getTranscodingVideoWidth()
+    val dstH = task.getTranscodingVideoHeight()
+    val dstRatio = dstW.toFloat() / dstH
+
+    // Scale (fit-to-fill, sau xoay)
+    val scale = maxOf(
+        dstW.toFloat() / srcWAfterRot,
+        dstH.toFloat() / srcHAfterRot
+    )
+    val needResize = kotlin.math.abs(scale - 1f) > 0.01f
+
+    // Crop nếu tỷ lệ khác nhau sau xoay
+    val needCrop = kotlin.math.abs((srcWAfterRot.toFloat() / srcHAfterRot) - dstRatio) > 0.01f
+
+    SLog.i(TAG, """makeConverter:
+        | src=${srcW0}x${srcH0}, srcRot=$srcRot, dstRot=$dstRot, corrRot=$corrRot
+        | afterRot=${srcWAfterRot}x${srcHAfterRot}, dst=${dstW}x${dstH}
+        | scale=$scale, needRotate=$needRotate, needResize=$needResize, needCrop=$needCrop
+    """.trimToOneLine())
+
+    val converters = mutableListOf<ImgpConverter>().apply {
+        if (needRotate) add(ImgpConverter(UniImgp.ofRotate()))
+        if (needResize) add(ImgpConverter(UniImgp.ofResize()))
+        if (needCrop)   add(ImgpConverter(UniImgp.ofCrop()))
+    }
+
+    return Operator { ibuf, obuf ->
+        var input = ibuf
+        var output = obuf
+
+        for ((idx, imgpConverter) in converters.withIndex()) {
+            val isLast = idx == converters.lastIndex
+
+            output = when (imgpConverter.imgpType) {
+                ImgpType.ROTATE -> {
+                    SLog.i(TAG, "--- ROTATE ---")
+
+                    // Lấy kích thước thực từ hardware buffer của input
+                    val inHB = input.getTypedData(HardwareBuffer::class.java)
+                    val inW  = inHB.width
+                    val inH  = inHB.height
+
+                    val (outW, outH) = when (corrRot) {
+                        90, 270 -> inH to inW
+                        else    -> inW to inH
+                    }
+
+                    val newFormat = input.format.toMutableFormat().apply {
+                        rotation = corrRot
+                        cols = outW           // KHÔNG dùng input.format.cols
+                        rows = outH           // KHÔNG dùng input.format.rows
+                    }
+
+                    SLog.i(TAG, "rotate in=${inW}x${inH} → out=${outW}x${outH}, corr=$corrRot")
+
+                    MediaBuffer.newImageAlloc().apply {
+                        setMediaFormat(newFormat)
+                        if (isLast && obuf.isNotEmpty) setData(obuf.getData()) else {
+                            asSharable()
+                            setUsage(obuf.getTypedData(HardwareBuffer::class.java).usage)
+                        }
+                    }.allocateMutable()
+                }
+
+                ImgpType.RESIZE -> {
+                    SLog.i(TAG, "--- RESIZE ---")
+                    // Dựa trên kích thước hiện tại (đã rotated nếu có)
+                    MediaBuffer.newImageAlloc().apply {
+                        val newFormat = input.format.toMutableFormat().apply {
+                            cols = (cols * scale).roundToNearestEven()
+                            rows = (rows * scale).roundToNearestEven()
+                        }
+                        SLog.i(TAG, "resize to ${newFormat.cols}x${newFormat.rows} (scale=$scale)")
+                        setMediaFormat(newFormat)
+                        if (isLast && obuf.isNotEmpty) setData(obuf.getData()) else {
+                            asSharable()
+                            setUsage(obuf.getTypedData(HardwareBuffer::class.java).usage)
+                        }
+                    }.allocateMutable()
+                }
+
+                ImgpType.CROP -> {
+                    SLog.i(TAG, "--- CROP ---")
+                    MediaBuffer.newImageAlloc().apply {
+                        // Crop theo out (encoder surface)
+                        val cropRect = computeCropRect(input.format, obuf.format)
+                        val newFormat = obuf.format.toMutableFormat().setCropRect(cropRect)
+                        SLog.i(TAG, "crop rect=$cropRect")
+                        setMediaFormat(newFormat)
+                        if (isLast && obuf.isNotEmpty) setData(obuf.getData()) else {
+                            asSharable()
+                            setUsage(obuf.getTypedData(HardwareBuffer::class.java).usage)
+                        }
+                    }.allocateMutable()
+                }
+
+                else -> throw UnsupportedOperationException("Unsupported imgpType=${imgpConverter.imgpType}")
+            }
+
+            // Thực thi native
+            input = imgpConverter.run(input, output)
+        }
+
+        output
+    }
+}
