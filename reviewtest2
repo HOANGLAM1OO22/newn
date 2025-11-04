@@ -1,0 +1,181 @@
+Perfect 👍 — below is a **production-ready `reload()` implementation** for `HEIFMetaReader`, written in the same coding style as your existing code and designed to integrate directly with the refactor in `HEIFMetaWriter`.
+
+It safely clears internal caches, re-parses the file, logs results, and tolerates partial parsing errors.
+
+---
+
+## ✅ Updated `HEIFMetaReader.kt`
+
+```kotlin
+class HEIFMetaReader(private var mediaFile: MediaFile) :
+    ImageMetaBase(mediaFile), ImageMetaReader {
+
+    private var coverImageId = 0
+    private val boxes = mutableMapOf<String, ImageMetaReader.Box>()
+    private val xmpIds = mutableListOf<Int>()
+    private val exifIds = mutableListOf<Int>()
+    private val references = mutableListOf<ItemReference>()
+    private val locations = mutableListOf<ItemLocation>()
+
+    private data class ItemReference(val id: Int) {
+        private val items = mutableListOf<Int>()
+        fun get(index: Int) = items[index]
+        fun add(id: Int) = items.add(id)
+    }
+
+    private data class ItemLocation(
+        val id: Int,
+        val baseOffset: Long,
+        val extentOffset: Long,
+        val extentLength: Long
+    ) {
+        val offset get() = baseOffset + extentOffset
+        val length get() = extentLength
+    }
+
+    init {
+        parseFile(mediaFile)
+    }
+
+    /**
+     * Reload current file state into this existing reader.
+     * Clears cached parsing data and re-parses structure.
+     * This allows external code to keep using the same instance safely.
+     */
+    fun reload(file: MediaFile = mediaFile) {
+        SLog.i(TAG, "Reload HEIFMetaReader for file: ${file.path}")
+        try {
+            clear()
+            mediaFile = file
+            parseFile(file)
+        } catch (e: Exception) {
+            SLog.e(TAG, "Failed to reload HEIFMetaReader: ${e.message}", e)
+        }
+    }
+
+    private fun clear() {
+        boxes.clear()
+        xmpIds.clear()
+        exifIds.clear()
+        references.clear()
+        locations.clear()
+        coverImageId = 0
+    }
+
+    /**
+     * Core logic that parses the HEIF structure and fills internal caches.
+     */
+    private fun parseFile(file: MediaFile) {
+        file.newInputFileStream().use { stream ->
+            try {
+                stream.channel.position(0)
+                while (!boxes.keys.containsAll(
+                        listOf(
+                            HEIF_IINF_BOX,
+                            HEIF_PITM_BOX,
+                            HEIF_IREF_BOX,
+                            HEIF_ILOC_BOX,
+                            HEIF_FREE_BOX
+                        )
+                    )
+                ) {
+                    val boxSize = stream.readAsIntBuffer(1).getLong() - 8
+                    if (boxSize <= 0) break
+
+                    when (stream.readAsString(4)) {
+                        HEIF_META_BOX -> stream.skip(4) // skip full-box header
+                        HEIF_IINF_BOX -> parseIINFBox(stream, boxSize)
+                        HEIF_IREF_BOX -> parseIREFBox(stream, boxSize)
+                        HEIF_PITM_BOX -> parsePITMBox(stream, boxSize)
+                        HEIF_ILOC_BOX -> parseILOCBox(stream, boxSize)
+                        HEIF_MPVD_BOX -> parseMPVDBox(stream, boxSize)
+                        HEIF_FREE_BOX -> parseFreeBox(stream, boxSize)
+                        else -> stream.skip(boxSize)
+                    }
+                }
+                SLog.d(TAG, "Parsed HEIF boxes: ${boxes.keys}")
+            } catch (e: Exception) {
+                SLog.w(TAG, "Partial parse failure: ${e.message}")
+            }
+        }
+    }
+
+    // --- Existing parsing functions below ---
+    // parseIINFBox(), parseIREFBox(), parsePITMBox(), parseILOCBox(), parseMPVDBox(), parseFreeBox() ...
+
+    override fun getXMP() = getMeta(xmpIds)
+
+    override fun getExif() = getMeta(exifIds)?.let {
+        val tiffOffset = ByteBuffer.wrap(byteReader.read(it.offset, 4)).asIntBuffer().get()
+        check(tiffOffset >= 6)
+        val exifOffset = 4 + tiffOffset - 6
+        ImageMetaReader.Box(it.offset + exifOffset, it.length - exifOffset, byteReader).also {
+            SLog.d(TAG, "found exif box: tiffOffset=$tiffOffset, exifOffset=$exifOffset, offset=${it.offset}, size=${it.length}")
+        }
+    }
+
+    override fun getCameraDebugInfo(): ImageMetaReader.Box? = boxes[HEIF_CDIF_BOX]
+
+    private fun getMeta(metaIds: List<Int>): ImageMetaReader.Box? {
+        if (metaIds.isEmpty()) return null
+
+        return references.firstOrNull {
+            val fromItem = it.id
+            val toItem = it.get(0)
+            metaIds.contains(fromItem) && toItem == coverImageId
+        }?.let { ref ->
+            locations.firstOrNull { it.id == ref.id }?.let {
+                ImageMetaReader.Box(it.offset, it.length, byteReader)
+            }
+        }
+    }
+
+    companion object {
+        private val TAG = SLog.tagOf(HEIFMetaReader::class.java)
+    }
+}
+```
+
+---
+
+### 🧠 Key design details
+
+| Aspect              | Explanation                                                                               |
+| ------------------- | ----------------------------------------------------------------------------------------- |
+| **`reload()`**      | Clears caches, logs re-load, and re-parses file safely without reallocating a new object. |
+| **`clear()`**       | Fully resets parsing state for consistent reloads.                                        |
+| **Error tolerance** | Exceptions are caught and logged with `SLog.w` (non-fatal).                               |
+| **`parseFile()`**   | Split from `init` for reuse by both constructor and reload.                               |
+
+---
+
+### 🧩 Integration in `HEIFMetaWriter`
+
+After adding `reload()` to the reader, update your writer calls:
+
+```kotlin
+// Before
+reader = HEIFMetaReader(mediaFile)
+
+// After
+reader.reload(mediaFile)
+```
+
+That ensures **external references remain valid** (e.g., if another module holds `reader` for querying metadata).
+
+---
+
+### 💬 Suggested commit message
+
+```
+refactor(heif): add reload() method to HEIFMetaReader for safe re-parsing
+
+- Move parsing logic into parseFile()
+- Add reload() API to allow reusing existing reader instance
+- Clear internal caches and reload metadata when file changes
+- Replace reader reallocation with reader.reload() in HEIFMetaWriter
+```
+
+---
+
+Would you like me to also show how to **unit test** the new `reload()` (with mock `MediaFile` or temp file) to ensure no side effects between calls?
