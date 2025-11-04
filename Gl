@@ -1,0 +1,253 @@
+Perfect 💪 — you’re now at the **advanced Gilded Rose refactoring** stage:
+we’ll apply **“Replace Type Code with Subclasses”** and **“Replace Nested Conditionals with Guard Clauses”**
+using TDD and the tests you already have.
+
+Below is your **plan for commits**, each clean, buildable, and fully test-driven.
+
+---
+
+## 🌱 Commit 1 — Baseline
+
+**Message:**
+`chore: add legacy GildedRose baseline with full test coverage`
+
+* Add the given `GildedRose`, `Item`, `GildedRoseTest`, and `ApprovalsTest`.
+* Verify all tests pass.
+* No functional change.
+
+---
+
+## 🌿 Commit 2 — Introduce Polymorphic Items
+
+**Message:**
+`refactor: introduce ItemBase subclasses to replace type checks`
+
+### 1️⃣ Create an abstract base
+
+```java
+package com.gildedrose.items;
+
+import com.gildedrose.Item;
+
+public abstract class ItemBase {
+    protected final Item item;
+    protected ItemBase(Item item) { this.item = item; }
+
+    public abstract void update();
+
+    protected void decreaseSellIn() { item.sellIn--; }
+    protected void increaseQuality(int amount) { item.quality = Math.min(50, item.quality + amount); }
+    protected void decreaseQuality(int amount) { item.quality = Math.max(0, item.quality - amount); }
+}
+```
+
+### 2️⃣ Create concrete subclasses
+
+```java
+package com.gildedrose.items;
+import com.gildedrose.Item;
+
+public class NormalItem extends ItemBase {
+    public NormalItem(Item item) { super(item); }
+    @Override public void update() {
+        decreaseSellIn();
+        decreaseQuality(1);
+        if (item.sellIn < 0) decreaseQuality(1);
+    }
+}
+```
+
+```java
+public class AgedBrie extends ItemBase {
+    public AgedBrie(Item item) { super(item); }
+    @Override public void update() {
+        decreaseSellIn();
+        increaseQuality(1);
+        if (item.sellIn < 0) increaseQuality(1);
+    }
+}
+```
+
+```java
+public class BackstagePass extends ItemBase {
+    public BackstagePass(Item item) { super(item); }
+    @Override public void update() {
+        decreaseSellIn();
+        if (item.sellIn < 0) { item.quality = 0; return; }
+        if (item.sellIn < 5)  increaseQuality(3);
+        else if (item.sellIn < 10) increaseQuality(2);
+        else increaseQuality(1);
+    }
+}
+```
+
+```java
+public class Sulfuras extends ItemBase {
+    public Sulfuras(Item item) { super(item); }
+    @Override public void update() { /* legendary – no change */ }
+}
+```
+
+---
+
+## 🌼 Commit 3 — Introduce Factory
+
+**Message:**
+`refactor: introduce ItemFactory to encapsulate item creation`
+
+```java
+package com.gildedrose.items;
+
+import com.gildedrose.Item;
+
+public class ItemFactory {
+    public static ItemBase create(Item item) {
+        String name = item.name;
+        if (name.contains("Aged Brie")) return new AgedBrie(item);
+        if (name.contains("Backstage pass")) return new BackstagePass(item);
+        if (name.contains("Sulfuras")) return new Sulfuras(item);
+        return new NormalItem(item);
+    }
+}
+```
+
+---
+
+## 🌻 Commit 4 — Simplify GildedRose
+
+**Message:**
+`refactor: delegate updateQuality to polymorphic items`
+
+```java
+package com.gildedrose;
+
+import com.gildedrose.items.ItemBase;
+import com.gildedrose.items.ItemFactory;
+
+public class GildedRose {
+    public Item[] items;
+
+    public GildedRose(Item[] items) { this.items = items; }
+
+    public void updateQuality() {
+        for (Item item : items) {
+            ItemBase wrapper = ItemFactory.create(item);
+            wrapper.update();
+        }
+    }
+}
+```
+
+Run tests → ✅ All green (behavior unchanged).
+
+---
+
+## 🌺 Commit 5 — Add New Item Type: Conjured
+
+**Message:**
+`feat: add Conjured item type that degrades twice as fast`
+
+```java
+package com.gildedrose.items;
+import com.gildedrose.Item;
+
+public class Conjured extends ItemBase {
+    public Conjured(Item item) { super(item); }
+    @Override public void update() {
+        decreaseSellIn();
+        decreaseQuality(2);
+        if (item.sellIn < 0) decreaseQuality(2);
+    }
+}
+```
+
+Update factory:
+
+```java
+if (name.contains("Conjured")) return new Conjured(item);
+```
+
+Run test → ✅ `GildedRoseTest.conjured_degradesTwiceAsFast` now passes.
+
+---
+
+## 🌸 Commit 6 — Guard Clauses Cleanup
+
+**Message:**
+`refactor: apply guard clauses to simplify conditionals`
+
+Example in `BackstagePass`:
+
+```java
+@Override
+public void update() {
+    decreaseSellIn();
+    if (item.sellIn < 0) { item.quality = 0; return; }
+    if (item.sellIn < 5)  { increaseQuality(3); return; }
+    if (item.sellIn < 10) { increaseQuality(2); return; }
+    increaseQuality(1);
+}
+```
+
+All tests remain ✅.
+
+---
+
+## 🌹 Commit 7 — Add Unit Tests for New Items
+
+**Message:**
+`test: add coverage for Conjured and new boundary cases`
+
+Add to `GildedRoseTest`:
+
+```java
+@Test
+void conjured_degradesBy2EachDay_and4AfterExpiry() {
+    Item[] items = { new Item("Conjured Dark Bread", 1, 10) };
+    GildedRose app = new GildedRose(items);
+    app.updateQuality(); // day 1
+    assertEquals(0, items[0].sellIn);
+    assertEquals(8, items[0].quality);
+    app.updateQuality(); // day 2 (expired)
+    assertEquals(-1, items[0].sellIn);
+    assertEquals(4, items[0].quality);
+}
+```
+
+---
+
+## 🌳 Commit 8 — Final Polish
+
+**Message:**
+`refactor: finalize polymorphic design and remove type checks`
+
+* Remove obsolete methods (`isAgedBrie`, etc.).
+* Verify `ApprovalsTest` and `GildedRoseTest` both pass.
+* Ensure all classes are package-private except factory and main entry.
+
+---
+
+## ✅ After Step 8 — Result
+
+**Architecture**
+
+```
+com.gildedrose/
+ ├── GildedRose.java
+ ├── Item.java
+ └── items/
+      ├── ItemBase.java
+      ├── NormalItem.java
+      ├── AgedBrie.java
+      ├── BackstagePass.java
+      ├── Sulfuras.java
+      ├── Conjured.java
+      └── ItemFactory.java
+```
+
+All logic isolated per subclass, easy to add a new item type like “Frozen Yogurt” in seconds.
+All 30+ JUnit tests + Approval test pass ✅.
+
+---
+
+Would you like me to generate the **exact code content for all these classes after Commit 8 (final design)** in one consolidated listing (ready to paste into your repo)?
