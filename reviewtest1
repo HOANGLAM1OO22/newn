@@ -1,0 +1,264 @@
+Excellent — the reviewer’s comments are **clear, accurate, and architectural**. Let’s go through each one systematically and show how a 20-year multimedia developer would *refactor properly* while keeping maintainability and OCP (Open–Closed Principle).
+Below are **3 refactoring points** (Commons.kt, JPEGMetaBase.kt, and HEIFMetaWriter.kt) with clean code–quality commits.
+
+---
+
+## 🧩 1️⃣ Commons.kt — Keep extensions, but add intent comment
+
+### 💬 Reviewer
+
+> Could you keep this extensions? it is for future use like debugging.
+> However, it's better to add comment "keep it for future use like debugging"
+
+### ✅ Refactor
+
+Keep the extension functions, but annotate them clearly so that later developers understand why they remain unused for now.
+
+```kotlin
+// utils/v2/Commons.kt
+fun ByteArray.toBuffer(): ByteBuffer {
+    return ByteBuffer.wrap(this)
+}
+
+/**
+ * Convert ByteBuffer to hex string.
+ * Keep it for future use such as debugging binary data or marker dump.
+ */
+fun ByteBuffer.toHexString(size: Int): String {
+    return mutableListOf<Byte>().also { list ->
+        repeat(size) {
+            list.add(get())
+        }
+        rewind()
+    }.toByteArray().joinToString(" ") { "%02x".format(it) }
+}
+```
+
+🧠 *Reasoning:*
+You preserve the extension for future debugging use, but document intent to prevent static-analysis removal or confusion.
+
+---
+
+## 🧩 2️⃣ JPEGMetaBase.kt — Clarify method purpose & prepare for OCP
+
+### 💬 Reviewer
+
+> How to call `findNextAppNMarker(fis.channel, 1, 4)` — It is more conveyed well for meaning of functionality.
+> Above getting type logic seems like separate responsibility of this method. Extract it and consider Strategy pattern for extensibility.
+
+### ✅ Refactor
+
+1. Change `findNextAppNMarker(fis: FileInputStream)` to call the more descriptive overload with explicit args.
+2. Extract metadata-type decision into a separate `MetaTypeDetector` interface — we can later register different detectors for `APPn` markers.
+
+```kotlin
+// utils/v2/io/JPEGMetaBase.kt
+open class JPEGMetaBase(mediaFile: MediaFile) : ImageMetaBase(mediaFile) {
+
+    protected fun getMeta(fis: FileInputStream, marker: Short): Triple<MetaType, Long, Long> {
+        return getMeta(fis.channel, marker)
+    }
+
+    protected fun findNextAppNMarker(fis: FileInputStream): Pair<Long, Int> {
+        // Clarify that we search between APP1 and APP4 markers.
+        return findNextAppNMarker(fis.channel, 1, 4)
+    }
+
+    protected fun getMeta(fc: FileChannel, marker: Short = JPEG_APP1_MARKER): Triple<MetaType, Long, Long> {
+        fc.skipNBytes(JPEG_MARKER_SIZE)
+
+        val payload = fc.readAsShortBuffer(1).getLong() - JPEG_LENGTH_SIZE
+        val position = fc.position()
+        val header = fc.readAsString(JPEG_MIN_SIZE_TO_META_TYPE_CHECK)
+        fc.position(position)
+
+        val metaType = MetaTypeDetectorRegistry.detect(marker, header)
+        return Triple(metaType, position, payload)
+    }
+
+    // unchanged findNextAppNMarker(...)
+}
+
+/**
+ * Separate responsibility: determine MetaType based on marker & header.
+ * This follows OCP and allows custom marker detection in the future.
+ */
+object MetaTypeDetectorRegistry {
+    private val detectors = mutableListOf<MetaTypeDetector>(
+        App1MetaTypeDetector(),
+        App4MetaTypeDetector()
+    )
+
+    fun detect(marker: Short, header: String): MetaType {
+        return detectors.firstOrNull { it.support(marker) }
+            ?.detect(header)
+            ?: MetaType.META_UNKNOWN
+    }
+}
+
+interface MetaTypeDetector {
+    fun support(marker: Short): Boolean
+    fun detect(header: String): MetaType
+}
+
+class App1MetaTypeDetector : MetaTypeDetector {
+    override fun support(marker: Short) = marker == JPEG_APP1_MARKER
+    override fun detect(header: String): MetaType = when {
+        header.startsWith(XMP_SIGNATURE) -> MetaType.META_XMP
+        header.startsWith("Exif") -> MetaType.META_EXIF
+        else -> MetaType.META_UNKNOWN
+    }
+}
+
+class App4MetaTypeDetector : MetaTypeDetector {
+    override fun support(marker: Short) = marker == JPEG_APP4_MARKER
+    override fun detect(header: String) = MetaType.META_CAMERA_DEBUG
+}
+```
+
+🧠 *Reasoning:*
+
+* Makes **responsibility separation** clear.
+* Future APP markers (APP5, APP6) can be added by registering new detectors without editing `JPEGMetaBase`.
+* Improves testability — detectors can be unit-tested separately.
+
+---
+
+## 🧩 3️⃣ HEIFMetaWriter.kt — Extract `init{}` logic into `load()` method
+
+### 💬 Reviewer
+
+> How to extract logics in init{} to load() method & call it here instead replace instance.
+> Since, for the case that reader is shared externally, this realloc of reader can't affect to external instance while file is changed.
+
+### ✅ Refactor
+
+Extract initialization logic to a reusable `load()` method and reuse existing `reader` reference instead of replacing it with a new instance.
+
+```kotlin
+// utils/v2/io/HEIFMetaWriter.kt
+internal class HEIFMetaWriter(private val mediaFile: MediaFile)
+    : ImageMetaBase(mediaFile), ImageMetaWriter {
+
+    private val reserveXMPOnHEIF: (FileDescriptor, Int) -> Long
+    private val removeXMPOnHEIF: (FileDescriptor) -> Unit
+
+    private var reader: HEIFMetaReader = HEIFMetaReader(mediaFile)
+
+    init {
+        if (useNewApi()) {
+            reserveXMPOnHEIF = ::nReserveXMPOnHEIF
+            removeXMPOnHEIF = ::nRemoveXMPOnHEIF
+        } else {
+            reserveXMPOnHEIF = { fd, xmpSize ->
+                SLog.i(TAG, "reserve xmp: V1")
+                HeicXMPComposer(fd).reserveXMP(xmpSize)
+            }
+            removeXMPOnHEIF = { fd ->
+                SLog.i(TAG, "remove xmp: V1")
+                HeicXMPComposer(fd).removeXmp()
+            }
+        }
+        // defer loading until needed
+        load()
+    }
+
+    /**
+     * Reload the current file state into existing reader instead of reallocating it.
+     * This preserves external reference to reader.
+     */
+    fun load() {
+        reader.reload(mediaFile)
+    }
+
+    override fun writeCameraDebugInfo(data: ByteArray) {
+        require(data.isNotEmpty())
+        val existing = reader.getCameraDebugInfo()
+        mediaFile.useFileChannel(StandardOpenOption.READ, StandardOpenOption.WRITE) {
+            if (existing != null) {
+                var (boxStart, boxSize, _) = existing
+                boxStart -= 12
+                boxSize += 12
+                it.position(boxStart + boxSize)
+                it.shiftLeftSafely(boxSize.toInt())
+                appendFreeCdif(it, data)
+            }
+        }
+        load() // instead of reassigning reader
+    }
+
+    override fun removeCameraDebugInfo() {
+        val existing = reader.getCameraDebugInfo() ?: return
+        var (boxStart, boxSize, _) = existing
+        boxStart -= 12
+        boxSize += 12
+        mediaFile.useFileChannel(StandardOpenOption.READ, StandardOpenOption.WRITE) {
+            val fileEnd = it.size()
+            if (boxStart + boxSize == fileEnd) {
+                it.truncate(boxStart)
+            } else {
+                it.position(boxStart)
+                val buf = ByteBuffer.allocate((fileEnd - boxStart - boxSize).toInt()).apply {
+                    putInt(8)
+                    put(HEIF_FREE_BOX.toByteArray(Charsets.UTF_8))
+                    flip()
+                }
+                it.write(buf)
+            }
+        }
+        load() // instead of reassigning reader
+    }
+
+    // ... (rest unchanged)
+}
+```
+
+You would also add a simple `reload()` method in `HEIFMetaReader`:
+
+```kotlin
+fun reload(mediaFile: MediaFile) {
+    boxes.clear()
+    xmpIds.clear()
+    exifIds.clear()
+    references.clear()
+    locations.clear()
+    // Re-parse file structure
+    parseFile(mediaFile)
+}
+```
+
+🧠 *Reasoning:*
+
+* Preserves shared `reader` reference; external consumers don’t lose state.
+* Reduces side effects (no hidden reallocation).
+* Improves readability — `load()` clearly conveys “re-parse file structure”.
+
+---
+
+## ✅ Summary of Improvements
+
+| File                  | Key Change                                                   | Benefit                                                    |
+| --------------------- | ------------------------------------------------------------ | ---------------------------------------------------------- |
+| **Commons.kt**        | Added comment to clarify extension’s future purpose          | Maintains helpful debug utility                            |
+| **JPEGMetaBase.kt**   | Extracted MetaType detection → Strategy pattern              | Improves extensibility & SRP                               |
+| **HEIFMetaWriter.kt** | Moved init logic into `load()` & removed reader reallocation | Preserves external references & avoids hidden side effects |
+
+---
+
+### 🏁 Commit Messages (for Gerrit / GitHub)
+
+1. **docs(utils): add comment for debugging extensions**
+
+   > Keep `ByteBuffer.toHexString()` for future debug use with clear comment.
+
+2. **refactor(jpeg): extract MetaTypeDetector from JPEGMetaBase**
+
+   > Apply Strategy pattern for marker type detection (APP1/APP4) to follow OCP.
+
+3. **refactor(heif): extract init logic to load() and avoid reader reallocation**
+
+   > Replace re-instantiation with `load()` method to preserve shared reader reference.
+
+---
+
+Would you like me to show the `reload()` implementation for `HEIFMetaReader` with safe parsing and logging?
