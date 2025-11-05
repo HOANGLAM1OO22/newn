@@ -1,0 +1,746 @@
+Tuyệt — mình đã refactor toàn bộ “SuperMarket TDD” theo đúng yêu cầu: tách tính khuyến mãi ra khỏi `ShoppingCart`, dùng **polymorphism/Strategy** cho Offer, áp dụng **Template Method** cho printer (Text & HTML), và thêm test đầy đủ. Dưới đây là 5 commit theo trình tự TDD/Clean Code (Red→Green→Refactor). Bạn có thể copy nguyên khối từng commit để áp vào repo của bạn.
+
+---
+
+# Commit 1 — Small cleanup & fix printer bug
+
+**Message**: `fix: format quantity for Each items + tidy printer`
+
+* Sửa lỗi in số lượng ở `ReceiptPrinter.presentQuantity()` (đang dùng `%x` là hex → `%d`).
+* Giữ nguyên cấu trúc các lớp khác để tránh phá vỡ test sẵn có.
+
+```java
+// File: src/main/java/dojo/supermarket/ReceiptPrinter.java
+package dojo.supermarket;
+
+import dojo.supermarket.model.*;
+
+import java.util.Locale;
+
+public class ReceiptPrinter {
+
+    private final int columns;
+
+    public ReceiptPrinter() {
+        this(40);
+    }
+
+    public ReceiptPrinter(int columns) {
+        this.columns = columns;
+    }
+
+    public String printReceipt(Receipt receipt) {
+        StringBuilder result = new StringBuilder();
+        for (ReceiptItem item : receipt.getItems()) {
+            String receiptItem = presentReceiptItem(item);
+            result.append(receiptItem);
+        }
+        for (Discount discount : receipt.getDiscounts()) {
+            String discountPresentation = presentDiscount(discount);
+            result.append(discountPresentation);
+        }
+
+        result.append("\n");
+        result.append(presentTotal(receipt));
+        return result.toString();
+    }
+
+    private String presentReceiptItem(ReceiptItem item) {
+        String totalPricePresentation = presentPrice(item.getTotalPrice());
+        String name = item.getProduct().getName();
+
+        String line = formatLineWithWhitespace(name, totalPricePresentation);
+
+        if (item.getQuantity() != 1) {
+            line += "  " + presentPrice(item.getPrice()) + " * " + presentQuantity(item) + "\n";
+        }
+        return line;
+    }
+
+    private String presentDiscount(Discount discount) {
+        String name = discount.getDescription() + "(" + discount.getProduct().getName() + ")";
+        String value = "-" + presentPrice(discount.getDiscountAmount());
+
+        return formatLineWithWhitespace(name, value);
+    }
+
+    private String presentTotal(Receipt receipt) {
+        String name = "Total: ";
+        String value = presentPrice(receipt.getTotalPrice());
+        return formatLineWithWhitespace(name, value);
+    }
+
+    private String formatLineWithWhitespace(String name, String value) {
+        StringBuilder line = new StringBuilder();
+        line.append(name);
+        int whitespaceSize = this.columns - name.length() - value.length();
+        for (int i = 0; i < whitespaceSize; i++) {
+            line.append(" ");
+        }
+        line.append(value);
+        line.append('\n');
+        return line.toString();
+    }
+
+    private static String presentPrice(double price) {
+        return String.format(Locale.UK, "%.2f", price);
+    }
+
+    private static String presentQuantity(ReceiptItem item) {
+        return ProductUnit.Each.equals(item.getProduct().getUnit())
+                ? String.format("%d", (int) item.getQuantity())
+                : String.format(Locale.UK, "%.3f", item.getQuantity());
+    }
+}
+```
+
+---
+
+# Commit 2 — Replace Conditional with Polymorphism (Offer → Strategy)
+
+**Message**: `refactor: move offer calculation from ShoppingCart to Teller using OfferPolicy strategies`
+
+## Ý tưởng
+
+* `ShoppingCart` **không** tính khuyến mãi nữa.
+* `Teller` giữ map `Product → OfferPolicy`.
+* `OfferPolicy` là interface, có nhiều implement: `ThreeForTwoOffer`, `TwoForAmountOffer`, `FiveForAmountOffer`, `PercentDiscountOffer`.
+* Giữ API cũ `addSpecialOffer(SpecialOfferType, Product, double)` nhưng bên trong **adapter** sang `OfferPolicy`.
+
+### 1) Tạo interface và các chiến lược
+
+```java
+// File: src/main/java/dojo/supermarket/model/OfferPolicy.java
+package dojo.supermarket.model;
+
+public interface OfferPolicy {
+    /**
+     * @param product     product
+     * @param quantity    quantity in cart (double, có thể là kilo hoặc each)
+     * @param unitPrice   unit price from catalog
+     * @return Discount or null if not applicable
+     */
+    Discount apply(Product product, double quantity, double unitPrice);
+}
+```
+
+```java
+// File: src/main/java/dojo/supermarket/model/PercentDiscountOffer.java
+package dojo.supermarket.model;
+
+public class PercentDiscountOffer implements OfferPolicy {
+    private final double percent; // e.g. 10 means 10%
+
+    public PercentDiscountOffer(double percent) {
+        this.percent = percent;
+    }
+
+    @Override
+    public Discount apply(Product product, double quantity, double unitPrice) {
+        if (percent <= 0) return null;
+        double discountAmount = quantity * unitPrice * (percent / 100.0);
+        return new Discount(product, (int) percent + "% off", discountAmount);
+    }
+}
+```
+
+```java
+// File: src/main/java/dojo/supermarket/model/ThreeForTwoOffer.java
+package dojo.supermarket.model;
+
+public class ThreeForTwoOffer implements OfferPolicy {
+
+    @Override
+    public Discount apply(Product product, double quantity, double unitPrice) {
+        int qty = (int) quantity; // áp dụng cho Each
+        if (qty < 3) return null;
+        int groups = qty / 3;
+        double discountAmount = groups * unitPrice; // mỗi nhóm 3 tính tiền 2 => giảm 1 unitPrice
+        return new Discount(product, "3 for 2", discountAmount);
+    }
+}
+```
+
+```java
+// File: src/main/java/dojo/supermarket/model/TwoForAmountOffer.java
+package dojo.supermarket.model;
+
+public class TwoForAmountOffer implements OfferPolicy {
+    private final double amountForTwo; // e.g. 2 boxes for €0.99
+
+    public TwoForAmountOffer(double amountForTwo) {
+        this.amountForTwo = amountForTwo;
+    }
+
+    @Override
+    public Discount apply(Product product, double quantity, double unitPrice) {
+        int qty = (int) quantity; // áp dụng cho Each
+        if (qty < 2) return null;
+        int groups = qty / 2;
+        double regularPriceForPairs = groups * 2 * unitPrice;
+        double promoPriceForPairs = groups * amountForTwo;
+        double discountAmount = regularPriceForPairs - promoPriceForPairs;
+        if (discountAmount <= 0) return null;
+        return new Discount(product, "2 for " + amountForTwo, discountAmount);
+    }
+}
+```
+
+```java
+// File: src/main/java/dojo/supermarket/model/FiveForAmountOffer.java
+package dojo.supermarket.model;
+
+public class FiveForAmountOffer implements OfferPolicy {
+    private final double amountForFive; // e.g. 5 tubes for €7.49
+
+    public FiveForAmountOffer(double amountForFive) {
+        this.amountForFive = amountForFive;
+    }
+
+    @Override
+    public Discount apply(Product product, double quantity, double unitPrice) {
+        int qty = (int) quantity; // áp dụng cho Each
+        if (qty < 5) return null;
+        int groups = qty / 5;
+        double regularPriceForGroups = groups * 5 * unitPrice;
+        double promoPriceForGroups = groups * amountForFive;
+        double discountAmount = regularPriceForGroups - promoPriceForGroups;
+        if (discountAmount <= 0) return null;
+        return new Discount(product, "5 for " + amountForFive, discountAmount);
+    }
+}
+```
+
+### 2) Giữ `SpecialOfferType` & `Offer` (backward-compat), nhưng chỉ còn vai trò adapter
+
+```java
+// (giữ nguyên) File: src/main/java/dojo/supermarket/model/SpecialOfferType.java
+package dojo.supermarket.model;
+
+public enum SpecialOfferType {
+    ThreeForTwo, TenPercentDiscount, TwoForAmount, FiveForAmount;
+}
+```
+
+```java
+// (giữ nguyên DTO) File: src/main/java/dojo/supermarket/model/Offer.java
+package dojo.supermarket.model;
+
+public class Offer {
+    SpecialOfferType offerType;
+    private final Product product;
+    double argument;
+
+    public Offer(SpecialOfferType offerType, Product product, double argument) {
+        this.offerType = offerType;
+        this.argument = argument;
+        this.product = product;
+    }
+
+    Product getProduct() {
+        return this.product;
+    }
+}
+```
+
+### 3) Dọn `ShoppingCart`: bỏ `handleOffers`, chỉ giữ dữ liệu
+
+```java
+// File: src/main/java/dojo/supermarket/model/ShoppingCart.java
+package dojo.supermarket.model;
+
+import java.util.*;
+
+public class ShoppingCart {
+
+    private final List<ProductQuantity> items = new ArrayList<>();
+    Map<Product, Double> productQuantities = new LinkedHashMap<>();
+
+    List<ProductQuantity> getItems() {
+        return new ArrayList<>(items);
+    }
+
+    void addItem(Product product) {
+        this.addItemQuantity(product, 1.0);
+    }
+
+    Map<Product, Double> productQuantities() {
+        return productQuantities;
+    }
+
+    public void addItemQuantity(Product product, double quantity) {
+        items.add(new ProductQuantity(product, quantity));
+        productQuantities.merge(product, quantity, Double::sum);
+    }
+}
+```
+
+### 4) Refactor `Teller` để áp dụng OfferPolicy
+
+```java
+// File: src/main/java/dojo/supermarket/model/Teller.java
+package dojo.supermarket.model;
+
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+public class Teller {
+
+    private final SupermarketCatalog catalog;
+
+    // Map Product → OfferPolicy
+    private final Map<Product, OfferPolicy> policies = new HashMap<>();
+
+    public Teller(SupermarketCatalog catalog) {
+        this.catalog = catalog;
+    }
+
+    // Backward-compatible API
+    public void addSpecialOffer(SpecialOfferType offerType, Product product, double argument) {
+        OfferPolicy policy = toPolicy(offerType, argument);
+        policies.put(product, policy);
+    }
+
+    // New API (nếu muốn đăng ký thẳng policy)
+    public void addOfferPolicy(Product product, OfferPolicy policy) {
+        policies.put(product, policy);
+    }
+
+    private OfferPolicy toPolicy(SpecialOfferType type, double arg) {
+        switch (type) {
+            case ThreeForTwo: return new ThreeForTwoOffer();
+            case TwoForAmount: return new TwoForAmountOffer(arg);
+            case FiveForAmount: return new FiveForAmountOffer(arg);
+            case TenPercentDiscount: return new PercentDiscountOffer(arg);
+            default: throw new IllegalArgumentException("Unknown offer type: " + type);
+        }
+    }
+
+    public Receipt checksOutArticlesFrom(ShoppingCart cart) {
+        Receipt receipt = new Receipt();
+
+        // 1) Add all line items
+        List<ProductQuantity> productQuantities = cart.getItems();
+        for (ProductQuantity pq: productQuantities) {
+            Product p = pq.getProduct();
+            double quantity = pq.getQuantity();
+            double unitPrice = this.catalog.getUnitPrice(p);
+            double price = quantity * unitPrice;
+            receipt.addProduct(p, quantity, unitPrice, price);
+        }
+
+        // 2) Apply discounts by product
+        for (Map.Entry<Product, Double> entry : cart.productQuantities().entrySet()) {
+            Product p = entry.getKey();
+            double quantity = entry.getValue();
+            OfferPolicy policy = policies.get(p);
+            if (policy == null) continue;
+
+            double unitPrice = this.catalog.getUnitPrice(p);
+            Discount discount = policy.apply(p, quantity, unitPrice);
+            if (discount != null) {
+                receipt.addDiscount(discount);
+            }
+        }
+        return receipt;
+    }
+}
+```
+
+---
+
+# Commit 3 — Unit tests cho toàn bộ Offer
+
+**Message**: `test: add full coverage for all offers (10%, 20%, 2-for-amount, 3-for-2, 5-for-amount)`
+
+```java
+// File: src/test/java/dojo/supermarket/model/SupermarketOffersTest.java
+package dojo.supermarket.model;
+
+import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+public class SupermarketOffersTest {
+
+    @Test
+    void tenPercentOnEachItem() {
+        SupermarketCatalog catalog = new FakeCatalog();
+        Product toothbrush = new Product("toothbrush", ProductUnit.Each);
+        catalog.addProduct(toothbrush, 0.99);
+
+        ShoppingCart cart = new ShoppingCart();
+        cart.addItemQuantity(toothbrush, 3);
+
+        Teller teller = new Teller(catalog);
+        teller.addSpecialOffer(SpecialOfferType.TenPercentDiscount, toothbrush, 10.0);
+
+        Receipt receipt = teller.checksOutArticlesFrom(cart);
+
+        // subtotal = 3 * 0.99 = 2.97
+        // discount = 10% of 2.97 = 0.297 => total ≈ 2.673
+        assertEquals(2.97 - 0.297, receipt.getTotalPrice(), 1e-6);
+        assertEquals(1, receipt.getDiscounts().size());
+    }
+
+    @Test
+    void twentyPercentOnApplesPerKilo() {
+        SupermarketCatalog catalog = new FakeCatalog();
+        Product apples = new Product("apples", ProductUnit.Kilo);
+        catalog.addProduct(apples, 1.99);
+
+        ShoppingCart cart = new ShoppingCart();
+        cart.addItemQuantity(apples, 2.5);
+
+        Teller teller = new Teller(catalog);
+        teller.addSpecialOffer(SpecialOfferType.TenPercentDiscount, apples, 20.0);
+
+        Receipt receipt = teller.checksOutArticlesFrom(cart);
+
+        // subtotal = 2.5 * 1.99 = 4.975
+        // discount = 20% * 4.975 = 0.995
+        assertEquals(4.975 - 0.995, receipt.getTotalPrice(), 1e-6);
+        assertEquals(1, receipt.getDiscounts().size());
+    }
+
+    @Test
+    void threeForTwoToothbrush() {
+        SupermarketCatalog catalog = new FakeCatalog();
+        Product toothbrush = new Product("toothbrush", ProductUnit.Each);
+        catalog.addProduct(toothbrush, 0.99);
+
+        ShoppingCart cart = new ShoppingCart();
+        cart.addItemQuantity(toothbrush, 7); // groups=2 → discount = 2 * 0.99
+
+        Teller teller = new Teller(catalog);
+        teller.addSpecialOffer(SpecialOfferType.ThreeForTwo, toothbrush, 0);
+
+        Receipt receipt = teller.checksOutArticlesFrom(cart);
+
+        double subtotal = 7 * 0.99;
+        double discount = 2 * 0.99;
+        assertEquals(subtotal - discount, receipt.getTotalPrice(), 1e-6);
+        assertEquals(1, receipt.getDiscounts().size());
+    }
+
+    @Test
+    void twoForAmountCherryTomatoes() {
+        SupermarketCatalog catalog = new FakeCatalog();
+        Product tomatoes = new Product("cherry tomatoes", ProductUnit.Each);
+        catalog.addProduct(tomatoes, 0.69);
+
+        ShoppingCart cart = new ShoppingCart();
+        cart.addItemQuantity(tomatoes, 5); // 2-for-0.99 applied twice; +1 at regular
+
+        Teller teller = new Teller(catalog);
+        teller.addSpecialOffer(SpecialOfferType.TwoForAmount, tomatoes, 0.99);
+
+        Receipt receipt = teller.checksOutArticlesFrom(cart);
+
+        double regular = 5 * 0.69;           // 3.45
+        double promo = 2 * 0.99 + 0.69;      // 2 pairs => 1.98, +1 regular => 2.67
+        double expected = promo;             // or regular - discount
+        assertEquals(expected, receipt.getTotalPrice(), 1e-6);
+        assertEquals(1, receipt.getDiscounts().size());
+    }
+
+    @Test
+    void fiveForAmountToothpaste() {
+        SupermarketCatalog catalog = new FakeCatalog();
+        Product toothpaste = new Product("toothpaste", ProductUnit.Each);
+        catalog.addProduct(toothpaste, 1.79);
+
+        ShoppingCart cart = new ShoppingCart();
+        cart.addItemQuantity(toothpaste, 13); // groups=2 (10 items), remainder=3
+
+        Teller teller = new Teller(catalog);
+        teller.addSpecialOffer(SpecialOfferType.FiveForAmount, toothpaste, 7.49);
+
+        Receipt receipt = teller.checksOutArticlesFrom(cart);
+
+        double regular = 13 * 1.79;
+        double promoGroups = 2 * 7.49; // 10 items
+        double remain = 3 * 1.79;
+        double expected = promoGroups + remain;
+        assertEquals(expected, receipt.getTotalPrice(), 1e-6);
+        assertEquals(1, receipt.getDiscounts().size());
+    }
+}
+```
+
+---
+
+# Commit 4 — Template Method cho printer (Text & HTML)
+
+**Message**: `refactor: introduce AbstractReceiptPrinter (Template Method) + move text printer to subclass`
+
+## Template base
+
+```java
+// File: src/main/java/dojo/supermarket/print/AbstractReceiptPrinter.java
+package dojo.supermarket.print;
+
+import dojo.supermarket.model.Discount;
+import dojo.supermarket.model.Receipt;
+import dojo.supermarket.model.ReceiptItem;
+
+public abstract class AbstractReceiptPrinter {
+
+    public final String print(Receipt receipt) {
+        StringBuilder out = new StringBuilder();
+        begin(out);
+
+        for (ReceiptItem item : receipt.getItems()) {
+            addItem(out, item);
+        }
+        for (Discount discount : receipt.getDiscounts()) {
+            addDiscount(out, discount);
+        }
+
+        addTotal(out, receipt);
+        end(out);
+        return out.toString();
+    }
+
+    // Hooks
+    protected abstract void begin(StringBuilder out);
+    protected abstract void addItem(StringBuilder out, ReceiptItem item);
+    protected abstract void addDiscount(StringBuilder out, Discount discount);
+    protected abstract void addTotal(StringBuilder out, Receipt receipt);
+    protected abstract void end(StringBuilder out);
+}
+```
+
+## Text printer (thay cho ReceiptPrinter cũ)
+
+```java
+// File: src/main/java/dojo/supermarket/print/TextReceiptPrinter.java
+package dojo.supermarket.print;
+
+import dojo.supermarket.model.*;
+
+import java.util.Locale;
+
+public class TextReceiptPrinter extends AbstractReceiptPrinter {
+
+    private final int columns;
+
+    public TextReceiptPrinter() { this(40); }
+    public TextReceiptPrinter(int columns) { this.columns = columns; }
+
+    @Override
+    protected void begin(StringBuilder out) { /* nothing */ }
+
+    @Override
+    protected void addItem(StringBuilder out, ReceiptItem item) {
+        String totalPricePresentation = presentPrice(item.getTotalPrice());
+        String name = item.getProduct().getName();
+
+        out.append(formatLineWithWhitespace(name, totalPricePresentation));
+
+        if (item.getQuantity() != 1) {
+            out.append("  ").append(presentPrice(item.getPrice()))
+               .append(" * ").append(presentQuantity(item)).append("\n");
+        }
+    }
+
+    @Override
+    protected void addDiscount(StringBuilder out, Discount discount) {
+        String name = discount.getDescription() + "(" + discount.getProduct().getName() + ")";
+        String value = "-" + presentPrice(discount.getDiscountAmount());
+        out.append(formatLineWithWhitespace(name, value));
+    }
+
+    @Override
+    protected void addTotal(StringBuilder out, Receipt receipt) {
+        String name = "Total: ";
+        String value = presentPrice(receipt.getTotalPrice());
+        out.append(formatLineWithWhitespace(name, value));
+    }
+
+    @Override
+    protected void end(StringBuilder out) {
+        out.append("\n");
+    }
+
+    private String formatLineWithWhitespace(String name, String value) {
+        StringBuilder line = new StringBuilder();
+        line.append(name);
+        int whitespaceSize = Math.max(1, this.columns - name.length() - value.length());
+        for (int i = 0; i < whitespaceSize; i++) {
+            line.append(" ");
+        }
+        line.append(value);
+        line.append('\n');
+        return line.toString();
+    }
+
+    private static String presentPrice(double price) {
+        return String.format(Locale.UK, "%.2f", price);
+    }
+
+    private static String presentQuantity(ReceiptItem item) {
+        return ProductUnit.Each.equals(item.getProduct().getUnit())
+                ? String.format("%d", (int) item.getQuantity())
+                : String.format(Locale.UK, "%.3f", item.getQuantity());
+    }
+}
+```
+
+## HTML printer
+
+```java
+// File: src/main/java/dojo/supermarket/print/HtmlReceiptPrinter.java
+package dojo.supermarket.print;
+
+import dojo.supermarket.model.*;
+
+import java.util.Locale;
+
+public class HtmlReceiptPrinter extends AbstractReceiptPrinter {
+
+    @Override
+    protected void begin(StringBuilder out) {
+        out.append("<!DOCTYPE html><html><head><meta charset=\"utf-8\">")
+           .append("<title>Receipt</title>")
+           .append("<style>")
+           .append("table{border-collapse:collapse;width:100%}")
+           .append("th,td{border:1px solid #ddd;padding:8px;text-align:left}")
+           .append("tfoot td{font-weight:bold}")
+           .append("</style></head><body>")
+           .append("<h2>Receipt</h2>")
+           .append("<table>")
+           .append("<thead><tr><th>Product</th><th>Qty</th><th>Unit</th><th>Price</th><th>Total</th></tr></thead>")
+           .append("<tbody>");
+    }
+
+    @Override
+    protected void addItem(StringBuilder out, ReceiptItem item) {
+        Product p = item.getProduct();
+        String unit = p.getUnit().name();
+        out.append("<tr>")
+           .append("<td>").append(escape(p.getName())).append("</td>")
+           .append("<td>").append(presentQuantity(item)).append("</td>")
+           .append("<td>").append(escape(unit)).append("</td>")
+           .append("<td>").append(presentPrice(item.getPrice())).append("</td>")
+           .append("<td>").append(presentPrice(item.getTotalPrice())).append("</td>")
+           .append("</tr>");
+    }
+
+    @Override
+    protected void addDiscount(StringBuilder out, Discount discount) {
+        out.append("<tr>")
+           .append("<td colspan=\"4\">")
+           .append(escape(discount.getDescription()))
+           .append(" (").append(escape(discount.getProduct().getName())).append(")")
+           .append("</td>")
+           .append("<td>-").append(presentPrice(discount.getDiscountAmount())).append("</td>")
+           .append("</tr>");
+    }
+
+    @Override
+    protected void addTotal(StringBuilder out, Receipt receipt) {
+        out.append("</tbody><tfoot>")
+           .append("<tr><td colspan=\"4\">Total</td><td>")
+           .append(presentPrice(receipt.getTotalPrice()))
+           .append("</td></tr>")
+           .append("</tfoot>");
+    }
+
+    @Override
+    protected void end(StringBuilder out) {
+        out.append("</table></body></html>");
+    }
+
+    private static String presentPrice(double price) {
+        return String.format(Locale.UK, "%.2f", price);
+    }
+
+    private static String presentQuantity(ReceiptItem item) {
+        return ProductUnit.Each.equals(item.getProduct().getUnit())
+                ? String.format("%d", (int) item.getQuantity())
+                : String.format(Locale.UK, "%.3f", item.getQuantity());
+    }
+
+    private static String escape(String s) {
+        return s.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;");
+    }
+}
+```
+
+> Lưu ý: Bạn có thể **giữ `ReceiptPrinter` cũ** (đã sửa ở Commit 1) để không phá vỡ code hiện hữu, đồng thời dùng `TextReceiptPrinter`/`HtmlReceiptPrinter` mới trong chỗ gọi mới.
+
+---
+
+# Commit 5 — Tests cho HTML printer & demo end-to-end
+
+**Message**: `test: add HtmlReceiptPrinter tests and end-to-end receipt rendering`
+
+```java
+// File: src/test/java/dojo/supermarket/print/HtmlReceiptPrinterTest.java
+package dojo.supermarket.print;
+
+import dojo.supermarket.model.*;
+import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+public class HtmlReceiptPrinterTest {
+
+    @Test
+    void renderHtmlWithItemsAndDiscounts() {
+        SupermarketCatalog catalog = new FakeCatalog();
+        Product apples = new Product("apples", ProductUnit.Kilo);
+        Product toothbrush = new Product("toothbrush", ProductUnit.Each);
+        catalog.addProduct(apples, 1.99);
+        catalog.addProduct(toothbrush, 0.99);
+
+        ShoppingCart cart = new ShoppingCart();
+        cart.addItemQuantity(apples, 2.5);
+        cart.addItemQuantity(toothbrush, 3);
+
+        Teller teller = new Teller(catalog);
+        teller.addSpecialOffer(SpecialOfferType.TenPercentDiscount, apples, 20.0); // 20% off apples
+        teller.addSpecialOffer(SpecialOfferType.ThreeForTwo, toothbrush, 0);
+
+        Receipt receipt = teller.checksOutArticlesFrom(cart);
+
+        HtmlReceiptPrinter printer = new HtmlReceiptPrinter();
+        String html = printer.print(receipt);
+
+        assertTrue(html.startsWith("<!DOCTYPE html>"));
+        assertTrue(html.contains("<h2>Receipt</h2>"));
+        // total check (rough)
+        double expected =
+                (2.5 * 1.99 + 3 * 0.99)
+                        - (2.5 * 1.99 * 0.2)   // apples 20%
+                        - (1 * 0.99);         // 3-for-2 for toothbrush => one free
+        assertTrue(html.contains(String.format("%.2f", expected)));
+        assertTrue(html.contains("apples"));
+        assertTrue(html.contains("toothbrush"));
+        assertTrue(html.contains("Total"));
+        assertTrue(html.endsWith("</html>"));
+    }
+}
+```
+
+---
+
+## What changed (tổng kết kiến trúc)
+
+* **Trước**: `ShoppingCart.handleOffers()` là một khối `if/else` lớn cho từng `SpecialOfferType`.
+* **Sau**:
+
+  * `ShoppingCart` chỉ lưu items (SRP).
+  * `Teller` áp dụng khuyến mãi bằng **`OfferPolicy`** (Strategy) → **dễ mở rộng** thêm Offer mới chỉ bằng cách tạo class mới và map.
+  * **Template Method** cho printers: `AbstractReceiptPrinter` + `TextReceiptPrinter` và `HtmlReceiptPrinter`.
+* **Tests**: phủ đủ các offer đã mô tả (10%, 20%, 2-for-amount, 3-for-2, 5-for-amount) và in HTML.
+
+---
+
+## Gợi ý tiếp theo
+
+* Nếu bạn muốn, mình có thể tạo **Pull Request description** gọn gàng (EN + VI), kèm checklist, và **squash**/reword commit theo convention (feat/fix/refactor/test).
+* Mình cũng có thể **đổi ReceiptPrinter cũ** thành adapter gọi `TextReceiptPrinter` mới để code cũ không cần sửa chỗ gọi.
+* Nếu bạn có file `HtmlReceiptPrinter_Java.txt` mẫu HTML cụ thể, mình sẽ chỉnh format HTML cho **match 100%**.
