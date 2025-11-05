@@ -1,0 +1,227 @@
+Tốt lắm 👏
+Dưới đây là **bản giải thích chi tiết và dễ trình bày trước lớp** về phần **Printer refactoring** trong bài **SuperMarket TDD** — gồm **vấn đề trước**, **mục tiêu refactor**, **giải pháp Template Method**, **lợi ích**, và **cách test**.
+Mình viết theo phong cách bạn có thể **thuyết trình 3–5 phút** trong lớp kèm slide ngắn.
+
+---
+
+## 🧩 1. Vấn đề ban đầu
+
+Lớp ban đầu là:
+
+```java
+public class ReceiptPrinter {
+    public String printReceipt(Receipt receipt) {
+        // ...
+    }
+}
+```
+
+* Nó **in hoá đơn dạng text** (plain text) ra chuỗi String.
+* Nhưng sau này yêu cầu mới:
+
+  > “Cần thêm **HtmlPrinter** để in hoá đơn ra dạng HTML cho web hoặc email.”
+
+Vấn đề là:
+
+* Code in text và HTML **rất giống nhau về cấu trúc**:
+
+  * Lặp qua danh sách item → in từng item
+  * Lặp qua discount → in từng discount
+  * Cuối cùng in tổng cộng
+* Nhưng **khác nhau ở định dạng output** (text vs HTML).
+
+Nếu ta copy toàn bộ logic từ `ReceiptPrinter` sang `HtmlReceiptPrinter`,
+→ sẽ có **code trùng lặp rất lớn** và **khó bảo trì**.
+→ Nếu sau này thêm kiểu in khác (PDF, JSON, CSV, …), sẽ phải sửa ở nhiều nơi.
+
+---
+
+## 🎯 2. Mục tiêu refactoring
+
+> **Tách phần “logic chung” và “định dạng cụ thể” ra riêng biệt.**
+
+Cụ thể:
+
+* **Logic chung**: thứ tự in (items → discounts → total)
+* **Định dạng cụ thể**: cách trình bày (text hay HTML)
+
+Mẫu thiết kế phù hợp cho điều này chính là:
+
+> 🧠 **Template Method Pattern**
+
+---
+
+## 🧱 3. Áp dụng Template Method Pattern
+
+### ✳️ Tạo lớp trừu tượng (template)
+
+```java
+public abstract class AbstractReceiptPrinter {
+    public final String print(Receipt receipt) {
+        StringBuilder out = new StringBuilder();
+        begin(out);
+        for (ReceiptItem item : receipt.getItems()) addItem(out, item);
+        for (Discount d : receipt.getDiscounts()) addDiscount(out, d);
+        addTotal(out, receipt);
+        end(out);
+        return out.toString();
+    }
+
+    // Các bước con (hook) sẽ được subclass implement
+    protected abstract void begin(StringBuilder out);
+    protected abstract void addItem(StringBuilder out, ReceiptItem item);
+    protected abstract void addDiscount(StringBuilder out, Discount discount);
+    protected abstract void addTotal(StringBuilder out, Receipt receipt);
+    protected abstract void end(StringBuilder out);
+}
+```
+
+🔹 `print()` là **template method** — nó cố định thứ tự các bước.
+🔹 Các bước con (`addItem`, `addDiscount`, …) được **subclass override** để định nghĩa cách in cụ thể.
+
+---
+
+### 📝 Triển khai 1: TextReceiptPrinter
+
+```java
+public class TextReceiptPrinter extends AbstractReceiptPrinter {
+    @Override
+    protected void begin(StringBuilder out) {}
+
+    @Override
+    protected void addItem(StringBuilder out, ReceiptItem item) {
+        out.append(item.getProduct().getName()).append(" ");
+        out.append(String.format("%.2f", item.getTotalPrice())).append("\n");
+    }
+
+    @Override
+    protected void addDiscount(StringBuilder out, Discount discount) {
+        out.append(discount.getDescription()).append(" ");
+        out.append(String.format("-%.2f", discount.getDiscountAmount())).append("\n");
+    }
+
+    @Override
+    protected void addTotal(StringBuilder out, Receipt receipt) {
+        out.append("Total: ").append(String.format("%.2f", receipt.getTotalPrice())).append("\n");
+    }
+
+    @Override
+    protected void end(StringBuilder out) {}
+}
+```
+
+🟢 **Chức năng giống ReceiptPrinter cũ**,
+nhưng bây giờ chỉ tập trung vào **định dạng text**.
+
+---
+
+### 🖥️ Triển khai 2: HtmlReceiptPrinter
+
+```java
+public class HtmlReceiptPrinter extends AbstractReceiptPrinter {
+    @Override
+    protected void begin(StringBuilder out) {
+        out.append("<html><body><table>");
+    }
+
+    @Override
+    protected void addItem(StringBuilder out, ReceiptItem item) {
+        out.append("<tr><td>")
+           .append(item.getProduct().getName())
+           .append("</td><td>")
+           .append(String.format("%.2f", item.getTotalPrice()))
+           .append("</td></tr>");
+    }
+
+    @Override
+    protected void addDiscount(StringBuilder out, Discount discount) {
+        out.append("<tr><td colspan='2'>")
+           .append(discount.getDescription())
+           .append(" (-").append(String.format("%.2f", discount.getDiscountAmount()))
+           .append(")</td></tr>");
+    }
+
+    @Override
+    protected void addTotal(StringBuilder out, Receipt receipt) {
+        out.append("<tr><td>Total</td><td>")
+           .append(String.format("%.2f", receipt.getTotalPrice()))
+           .append("</td></tr>");
+    }
+
+    @Override
+    protected void end(StringBuilder out) {
+        out.append("</table></body></html>");
+    }
+}
+```
+
+🟢 Cấu trúc giống `TextReceiptPrinter`, nhưng định dạng HTML thay vì text.
+
+---
+
+## 💡 4. Kết quả đạt được
+
+| Tiêu chí                 | Trước khi refactor                        | Sau khi refactor                                       |
+| ------------------------ | ----------------------------------------- | ------------------------------------------------------ |
+| **Cấu trúc**             | Tất cả logic & định dạng nằm chung 1 lớp  | Logic chung tách ra lớp cha, định dạng riêng ở lớp con |
+| **Khả năng mở rộng**     | Thêm định dạng mới phải copy-paste        | Chỉ cần tạo subclass mới và override 5 hàm             |
+| **Trùng lặp code**       | Cao (in items, discounts, totals lặp lại) | Gần như không trùng lặp                                |
+| **Bảo trì**              | Khó chỉnh sửa nếu thêm feature mới        | Dễ dàng, chỉ cần sửa logic chung 1 lần                 |
+| **Mẫu thiết kế sử dụng** | ❌ None                                    | ✅ Template Method Pattern                              |
+
+---
+
+## 🧪 5. Kiểm thử
+
+Ta viết test cho HTML printer:
+
+```java
+@Test
+void renderHtmlWithItemsAndDiscounts() {
+    Teller teller = new Teller(catalog);
+    teller.addSpecialOffer(SpecialOfferType.ThreeForTwo, toothbrush, 0);
+    Receipt receipt = teller.checksOutArticlesFrom(cart);
+
+    HtmlReceiptPrinter printer = new HtmlReceiptPrinter();
+    String html = printer.print(receipt);
+
+    assertTrue(html.contains("<html>"));
+    assertTrue(html.contains("toothbrush"));
+    assertTrue(html.contains("Total"));
+}
+```
+
+✅ Kết quả test chứng minh:
+Cả `TextReceiptPrinter` và `HtmlReceiptPrinter` đều in đúng format nhưng dùng chung quy trình in.
+
+---
+
+## 🗣️ 6. Cách trình bày (slide gợi ý)
+
+**Slide 1: Problem**
+
+> * Printer chỉ in được text
+> * Muốn thêm HTML → phải copy code
+> * Code trùng lặp, khó mở rộng
+
+**Slide 2: Goal**
+
+> * Giữ logic in hoá đơn chung
+> * Cho phép nhiều định dạng khác nhau
+
+**Slide 3: Solution – Template Method Pattern**
+
+> * `AbstractReceiptPrinter.print()` = template
+> * Subclass (`Text`, `Html`) định nghĩa từng bước nhỏ
+
+**Slide 4: Benefits**
+
+> ✅ Dễ mở rộng
+> ✅ Giảm trùng lặp
+> ✅ Cấu trúc rõ ràng hơn
+> ✅ Tuân theo nguyên tắc OCP (Open–Closed Principle)
+
+---
+
+Nếu bạn muốn, mình có thể giúp bạn **tạo slide 4 trang ngắn gọn (PowerPoint hoặc PDF)** minh hoạ bằng sơ đồ “Template Method” (base class + 2 subclass).
+👉 Bạn có muốn mình xuất slide trình bày này không?
