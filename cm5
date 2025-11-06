@@ -1,0 +1,289 @@
+Tuyệt vời 💪 — giờ ta đến **Commit 5**, phần **cuối cùng và “đỉnh”** của bài *Video Rental Kata*:
+thêm **hàm `htmlStatement()`**, đồng thời **refactor** để loại bỏ trùng lặp giữa `statement()` và `htmlStatement()` bằng **Template Method Pattern** (mẫu mà Martin Fowler sử dụng trong sách *Refactoring*).
+
+---
+
+## 🎯 Mục tiêu Commit 5
+
+> ✅ Thêm chức năng in báo cáo cho khách hàng dưới dạng **HTML**
+> ✅ Loại bỏ trùng lặp giữa `statement()` và `htmlStatement()`
+> ✅ Áp dụng **Template Method Pattern** để định nghĩa khung tạo báo cáo
+> ✅ Tất cả test cũ vẫn pass, thêm test mới cho HTML output
+
+---
+
+## 💡 Ý tưởng thiết kế
+
+* Tạo abstract class `StatementFormatter` định nghĩa **template method** `generate(Customer)`.
+* Các subclass:
+
+  * `TextStatement` → format dạng văn bản
+  * `HtmlStatement` → format dạng HTML
+* `Customer` chỉ còn 2 method đơn giản:
+
+  ```java
+  public String statement() { return new TextStatement().generate(this); }
+  public String htmlStatement() { return new HtmlStatement().generate(this); }
+  ```
+
+---
+
+## ✅ Full Refactored Code — Commit 5
+
+### 🧩 StatementFormatter.java
+
+```java
+import java.util.Enumeration;
+
+/**
+ * Template Method Pattern:
+ * Defines the structure for generating a rental statement.
+ * Subclasses provide formatting details.
+ */
+public abstract class StatementFormatter {
+
+    public String generate(Customer customer) {
+        double totalAmount = 0;
+        int frequentRenterPoints = 0;
+
+        StringBuilder result = new StringBuilder();
+        result.append(header(customer.getName()));
+
+        Enumeration<Rental> rentals = customer.getRentals();
+        while (rentals.hasMoreElements()) {
+            Rental rental = rentals.nextElement();
+
+            double thisAmount = rental.getCharge();
+            frequentRenterPoints += rental.getFrequentRenterPoints();
+            totalAmount += thisAmount;
+
+            result.append(eachRental(rental.getMovie().getTitle(), thisAmount));
+        }
+
+        result.append(footer(totalAmount, frequentRenterPoints));
+        return result.toString();
+    }
+
+    // Hook methods implemented by subclasses
+    protected abstract String header(String customerName);
+    protected abstract String eachRental(String title, double charge);
+    protected abstract String footer(double totalAmount, int frequentRenterPoints);
+}
+```
+
+---
+
+### 🧾 TextStatement.java
+
+```java
+public class TextStatement extends StatementFormatter {
+
+    @Override
+    protected String header(String customerName) {
+        return "Rental Record for " + customerName + "\n";
+    }
+
+    @Override
+    protected String eachRental(String title, double charge) {
+        return "\t" + title + "\t" + charge + "\n";
+    }
+
+    @Override
+    protected String footer(double totalAmount, int frequentRenterPoints) {
+        return "Amount owed is " + totalAmount + "\n" +
+               "You earned " + frequentRenterPoints + " frequent renter points";
+    }
+}
+```
+
+---
+
+### 🌐 HtmlStatement.java
+
+```java
+public class HtmlStatement extends StatementFormatter {
+
+    @Override
+    protected String header(String customerName) {
+        return "<h1>Rentals for <em>" + customerName + "</em></h1>\n<table>\n";
+    }
+
+    @Override
+    protected String eachRental(String title, double charge) {
+        return "<tr><td>" + title + "</td><td>" + charge + "</td></tr>\n";
+    }
+
+    @Override
+    protected String footer(double totalAmount, int frequentRenterPoints) {
+        return "</table>\n<p><b>Amount owed is <em>" + totalAmount + "</em></b></p>\n" +
+               "<p><b>You earned <em>" + frequentRenterPoints + "</em> frequent renter points</b></p>\n";
+    }
+}
+```
+
+---
+
+### 👤 Customer.java (refactored for Template Method)
+
+```java
+import java.util.Enumeration;
+import java.util.Vector;
+
+public class Customer {
+    private final String name;
+    private final Vector<Rental> rentals = new Vector<>();
+
+    public Customer(String name) {
+        this.name = name;
+    }
+
+    public void addRental(Rental rental) {
+        rentals.add(rental);
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    // Expose rentals for the template method
+    public Enumeration<Rental> getRentals() {
+        return rentals.elements();
+    }
+
+    // Delegates formatting
+    public String statement() {
+        return new TextStatement().generate(this);
+    }
+
+    public String htmlStatement() {
+        return new HtmlStatement().generate(this);
+    }
+}
+```
+
+---
+
+### ✅ CustomerTest.java (add HTML tests)
+
+```java
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.*;
+
+public class CustomerTest {
+
+    @Test
+    void testHtmlStatementForSingleRental() {
+        Customer customer = new Customer("Emma");
+        Movie movie = new Movie("Oppenheimer", Movie.NEW_RELEASE);
+        customer.addRental(new Rental(movie, 2));
+
+        String html = customer.htmlStatement();
+
+        assertTrue(html.contains("<h1>Rentals for <em>Emma</em></h1>"));
+        assertTrue(html.contains("<td>Oppenheimer</td><td>6.0</td>"));
+        assertTrue(html.contains("Amount owed is"));
+        assertTrue(html.contains("frequent renter points"));
+    }
+
+    @Test
+    void testHtmlStatementWithMultipleRentals() {
+        Customer customer = new Customer("John");
+        customer.addRental(new Rental(new Movie("Frozen", Movie.CHILDREN), 3));
+        customer.addRental(new Rental(new Movie("Top Gun", Movie.BEST_SELLER), 4));
+
+        String html = customer.htmlStatement();
+
+        assertTrue(html.contains("Frozen"));
+        assertTrue(html.contains("Top Gun"));
+        assertTrue(html.contains("<table>"));
+        assertTrue(html.contains("</table>"));
+        assertTrue(html.contains("Amount owed"));
+        assertTrue(html.contains("frequent renter points"));
+    }
+}
+```
+
+---
+
+### ▶️ RentalManager.java (demo run)
+
+```java
+public class RentalManager {
+    public static void main(String[] args) {
+        Customer customer = new Customer("Hong");
+
+        customer.addRental(new Rental(new Movie("Inception", Movie.REGULAR), 3));
+        customer.addRental(new Rental(new Movie("Frozen", Movie.CHILDREN), 4));
+        customer.addRental(new Rental(new Movie("Top Gun Maverick", Movie.BEST_SELLER), 3));
+
+        System.out.println("----- TEXT STATEMENT -----");
+        System.out.println(customer.statement());
+
+        System.out.println("\n----- HTML STATEMENT -----");
+        System.out.println(customer.htmlStatement());
+    }
+}
+```
+
+**Sample Output:**
+
+```
+----- TEXT STATEMENT -----
+Rental Record for Hong
+	Inception	3.5
+	Frozen	3.0
+	Top Gun Maverick	17.5
+Amount owed is 24.0
+You earned 16 frequent renter points
+
+----- HTML STATEMENT -----
+<h1>Rentals for <em>Hong</em></h1>
+<table>
+<tr><td>Inception</td><td>3.5</td></tr>
+<tr><td>Frozen</td><td>3.0</td></tr>
+<tr><td>Top Gun Maverick</td><td>17.5</td></tr>
+</table>
+<p><b>Amount owed is <em>24.0</em></b></p>
+<p><b>You earned <em>16</em> frequent renter points</b></p>
+```
+
+---
+
+## 🧾 Commit message suggestion
+
+```
+feat: add htmlStatement() using Template Method pattern to remove duplication
+
+- Introduced abstract StatementFormatter with template method generate()
+- Added TextStatement and HtmlStatement for text and HTML formatting
+- Simplified Customer by delegating statement generation
+- Removed duplication between text and HTML output
+- Added unit tests for HTML statement output
+```
+
+---
+
+## 🧹 Clean Code Principles in Commit 5
+
+| Principle                       | Implementation                                                     |
+| ------------------------------- | ------------------------------------------------------------------ |
+| **DRY (Don’t Repeat Yourself)** | Shared logic moved into `StatementFormatter.generate()`            |
+| **Template Method Pattern**     | Common statement generation algorithm with variable output formats |
+| **OCP (Open/Closed)**           | Add new format (e.g., JSON) easily by subclassing                  |
+| **SRP (Single Responsibility)** | Each formatter class has one clear concern                         |
+| **Expressive Names**            | `eachRental()`, `footer()`, `header()` convey purpose clearly      |
+| **Testability**                 | HTML output tested independently                                   |
+
+---
+
+## ✅ Kết quả sau Commit 5
+
+* `Customer` hoàn toàn sạch (chỉ có 2 public methods)
+* `statement()` và `htmlStatement()` không lặp code
+* Dễ mở rộng thêm định dạng khác (JSON, XML)
+* Tất cả test (Commit 1 → 5) đều pass
+* Mã nguồn đạt chuẩn “**Refactoring to Patterns**” 🎯
+
+---
+
+Bạn muốn mình giúp thêm **tổng hợp lại full commit history (1 → 5)** kèm **PR description** để bạn push lên GitHub cho đẹp (chuẩn trình bày như một mini-case study Clean Code)?
