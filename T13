@@ -1,0 +1,202 @@
+Tốt lắm 👍
+Bạn đã xong **Commit 1** (đầy đủ test bao phủ toàn bộ hành vi legacy).
+Giờ sang **Commit 2**, chúng ta **bắt đầu refactor** để hiểu rõ hơn code cũ — *chưa đổi logic, chỉ cải thiện cấu trúc*.
+
+---
+
+## 🎯 Mục tiêu Commit 2
+
+> Refactor code tính phí và điểm thưởng trong `Customer.statement()` để dễ đọc, dễ bảo trì, và chuẩn bị cho polymorphism ở commit sau.
+
+---
+
+## 🧩 Các bước refactor Commit 2
+
+1. **Tách logic tính tiền ra khỏi vòng lặp** — đưa vào hàm riêng (`amountFor(Rental rental)`).
+2. **Tách logic tính điểm thưởng** — đưa vào hàm riêng (`getFrequentRenterPoints(Rental rental)`).
+3. **Giữ nguyên switch-case** (chưa thay bằng polymorphism).
+4. **Code test hiện tại phải PASS** (đảm bảo refactor an toàn).
+
+---
+
+## 📦 Kết quả sau Commit 2
+
+### ✅ Customer.java (refactored)
+
+```java
+import java.util.Enumeration;
+import java.util.Vector;
+
+public class Customer {
+    private String name;
+    private Vector<Rental> rentals = new Vector<>();
+
+    public Customer(String name) {
+        this.name = name;
+    }
+
+    public void addRental(Rental rental) {
+        rentals.add(rental);
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public String statement() {
+        double totalAmount = 0;
+        int frequentRenterPoints = 0;
+        Enumeration<Rental> enumRentals = rentals.elements();
+        StringBuilder result = new StringBuilder("Rental Record for " + getName() + "\n");
+
+        while (enumRentals.hasMoreElements()) {
+            Rental each = enumRentals.nextElement();
+
+            double thisAmount = amountFor(each);
+            int points = getFrequentRenterPoints(each);
+
+            frequentRenterPoints += points;
+            result.append("\t")
+                    .append(each.getMovie().getTitle())
+                    .append("\t")
+                    .append(thisAmount)
+                    .append("\n");
+
+            totalAmount += thisAmount;
+        }
+
+        result.append("Amount owed is ").append(totalAmount).append("\n");
+        result.append("You earned ").append(frequentRenterPoints).append(" frequent renter points");
+
+        return result.toString();
+    }
+
+    private double amountFor(Rental rental) {
+        double result = 0;
+        switch (rental.getMovie().getPriceCode()) {
+            case Movie.REGULAR:
+                result += 2;
+                if (rental.getDaysRented() > 2)
+                    result += (rental.getDaysRented() - 2) * 1.5;
+                break;
+            case Movie.NEW_RELEASE:
+                result += rental.getDaysRented() * 3;
+                break;
+            case Movie.CHILDREN:
+                result += 1.5;
+                if (rental.getDaysRented() > 3)
+                    result += (rental.getDaysRented() - 3) * 1.5;
+                break;
+        }
+        return result;
+    }
+
+    private int getFrequentRenterPoints(Rental rental) {
+        int points = 1;
+        // bonus for two-day new release rental
+        if ((rental.getMovie().getPriceCode() == Movie.NEW_RELEASE) &&
+                rental.getDaysRented() > 1) {
+            points++;
+        }
+        return points;
+    }
+}
+```
+
+---
+
+### ✅ Movie.java (unchanged)
+
+```java
+public class Movie {
+    public static final int REGULAR = 0;
+    public static final int NEW_RELEASE = 1;
+    public static final int CHILDREN = 2;
+
+    private String title;
+    private int priceCode;
+
+    public Movie(String title, int priceCode) {
+        this.title = title;
+        this.priceCode = priceCode;
+    }
+
+    public int getPriceCode() {
+        return priceCode;
+    }
+
+    public void setPriceCode(int priceCode) {
+        this.priceCode = priceCode;
+    }
+
+    public String getTitle() {
+        return title;
+    }
+}
+```
+
+---
+
+### ✅ Rental.java (unchanged)
+
+```java
+public class Rental {
+    private Movie movie;
+    private int daysRented;
+
+    public Rental(Movie movie, int daysRented) {
+        this.movie = movie;
+        this.daysRented = daysRented;
+    }
+
+    public int getDaysRented() {
+        return daysRented;
+    }
+
+    public Movie getMovie() {
+        return movie;
+    }
+}
+```
+
+---
+
+### ✅ RentalManager.java (demo, optional)
+
+```java
+public class RentalManager {
+    public static void main(String[] args) {
+        Customer customer = new Customer("Hong");
+        Movie regular = new Movie("Inception", Movie.REGULAR);
+        Movie newRelease = new Movie("Oppenheimer", Movie.NEW_RELEASE);
+        Movie children = new Movie("Frozen", Movie.CHILDREN);
+
+        customer.addRental(new Rental(regular, 3));
+        customer.addRental(new Rental(newRelease, 2));
+        customer.addRental(new Rental(children, 4));
+
+        System.out.println(customer.statement());
+    }
+}
+```
+
+---
+
+## ✅ Kết quả mong đợi
+
+* **Không thay đổi output** so với commit 1.
+* Code rõ ràng hơn, chia nhỏ hàm hợp lý.
+* Đã chuẩn bị cho commit 3: **“Replace Conditional with Polymorphism”**.
+
+---
+
+## 🧾 Commit message gợi ý:
+
+```
+refactor: extract amountFor() and getFrequentRenterPoints() from Customer.statement()
+```
+
+---
+
+Bạn có muốn mình tiếp tục **Commit 3 (Introduce Price hierarchy — Replace Conditional with Polymorphism)** liền bây giờ không?
+Commit này là bước quan trọng nhất trong quá trình refactor.
