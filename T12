@@ -1,0 +1,87 @@
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.*;
+
+public class CustomerTest {
+
+    @Test
+    void testRegularMovieLessThanTwoDays() {
+        Customer customer = new Customer("John");
+        Movie movie = new Movie("Matrix", Movie.REGULAR);
+        customer.addRental(new Rental(movie, 1));
+
+        String statement = customer.statement();
+        assertTrue(statement.contains("Matrix"));
+        assertTrue(statement.contains("Amount owed is 2.0"));
+        assertTrue(statement.contains("You earned 1 frequent renter points"));
+    }
+
+    @Test
+    void testRegularMovieMoreThanTwoDays() {
+        Customer customer = new Customer("John");
+        Movie movie = new Movie("Inception", Movie.REGULAR);
+        customer.addRental(new Rental(movie, 3));
+
+        String statement = customer.statement();
+        assertTrue(statement.contains("Amount owed is 3.5"));
+        assertTrue(statement.contains("You earned 1 frequent renter points"));
+    }
+
+    @Test
+    void testNewReleaseMovieOneDay() {
+        Customer customer = new Customer("Jane");
+        Movie movie = new Movie("Avatar", Movie.NEW_RELEASE);
+        customer.addRental(new Rental(movie, 1));
+
+        String statement = customer.statement();
+        assertTrue(statement.contains("Amount owed is 3.0"));
+        assertTrue(statement.contains("You earned 1 frequent renter points"));
+    }
+
+    @Test
+    void testNewReleaseMovieMoreThanOneDayGetsBonusPoint() {
+        Customer customer = new Customer("Jane");
+        Movie movie = new Movie("Oppenheimer", Movie.NEW_RELEASE);
+        customer.addRental(new Rental(movie, 3));
+
+        String statement = customer.statement();
+        assertTrue(statement.contains("Amount owed is 9.0"));
+        assertTrue(statement.contains("You earned 2 frequent renter points"));
+    }
+
+    @Test
+    void testChildrenMovieLessThanThreeDays() {
+        Customer customer = new Customer("Anna");
+        Movie movie = new Movie("Frozen", Movie.CHILDREN);
+        customer.addRental(new Rental(movie, 2));
+
+        String statement = customer.statement();
+        assertTrue(statement.contains("Amount owed is 1.5"));
+        assertTrue(statement.contains("You earned 1 frequent renter points"));
+    }
+
+    @Test
+    void testChildrenMovieMoreThanThreeDays() {
+        Customer customer = new Customer("Anna");
+        Movie movie = new Movie("Frozen 2", Movie.CHILDREN);
+        customer.addRental(new Rental(movie, 5));
+
+        String statement = customer.statement();
+        assertTrue(statement.contains("Amount owed is 4.5"));
+        assertTrue(statement.contains("You earned 1 frequent renter points"));
+    }
+
+    @Test
+    void testMultipleRentalsMixedTypes() {
+        Customer customer = new Customer("Liam");
+        customer.addRental(new Rental(new Movie("Matrix", Movie.REGULAR), 3));
+        customer.addRental(new Rental(new Movie("Frozen", Movie.CHILDREN), 4));
+        customer.addRental(new Rental(new Movie("Oppenheimer", Movie.NEW_RELEASE), 2));
+
+        String statement = customer.statement();
+
+        // total = 3.5 (Regular) + 3.0 (Children) + 6.0 (New Release)
+        assertTrue(statement.contains("Amount owed is 12.5"));
+        // points = 1 + 1 + 2 = 4
+        assertTrue(statement.contains("You earned 4 frequent renter points"));
+    }
+}
