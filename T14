@@ -1,0 +1,295 @@
+Rất tốt 👍
+Bây giờ chúng ta đến **Commit 3** — đây là commit quan trọng nhất trong toàn bộ quá trình refactor VideoRental.
+Mục tiêu là **loại bỏ switch-case** trong `Customer` và **thay bằng đa hình (Polymorphism)** thông qua lớp trừu tượng `Price`.
+
+---
+
+## 🎯 Mục tiêu Commit 3
+
+* Thay thế `switch (priceCode)` bằng các lớp con kế thừa từ `Price`.
+* Di chuyển logic tính phí và điểm thưởng từ `Customer` sang `Movie` → `Price`.
+* Code phải **đạt cùng kết quả với commit 2** (toàn bộ test vẫn **PASS**).
+
+---
+
+## 🔧 Thiết kế lớp mới
+
+### 🧩 Cấu trúc mới
+
+```
+src/main/java/
+ ├── Customer.java
+ ├── Movie.java
+ ├── Price.java ← NEW (abstract base)
+ ├── RegularPrice.java ← NEW
+ ├── NewReleasePrice.java ← NEW
+ ├── ChildrenPrice.java ← NEW
+ ├── Rental.java
+ └── RentalManager.java
+```
+
+---
+
+## 🧱 Full Code (Commit 3)
+
+### ✅ Price.java (new)
+
+```java
+public abstract class Price {
+    abstract int getPriceCode();
+    abstract double getCharge(int daysRented);
+
+    int getFrequentRenterPoints(int daysRented) {
+        return 1;
+    }
+}
+```
+
+---
+
+### ✅ RegularPrice.java
+
+```java
+public class RegularPrice extends Price {
+    @Override
+    int getPriceCode() {
+        return Movie.REGULAR;
+    }
+
+    @Override
+    double getCharge(int daysRented) {
+        double result = 2;
+        if (daysRented > 2)
+            result += (daysRented - 2) * 1.5;
+        return result;
+    }
+}
+```
+
+---
+
+### ✅ NewReleasePrice.java
+
+```java
+public class NewReleasePrice extends Price {
+    @Override
+    int getPriceCode() {
+        return Movie.NEW_RELEASE;
+    }
+
+    @Override
+    double getCharge(int daysRented) {
+        return daysRented * 3;
+    }
+
+    @Override
+    int getFrequentRenterPoints(int daysRented) {
+        return (daysRented > 1) ? 2 : 1;
+    }
+}
+```
+
+---
+
+### ✅ ChildrenPrice.java
+
+```java
+public class ChildrenPrice extends Price {
+    @Override
+    int getPriceCode() {
+        return Movie.CHILDREN;
+    }
+
+    @Override
+    double getCharge(int daysRented) {
+        double result = 1.5;
+        if (daysRented > 3)
+            result += (daysRented - 3) * 1.5;
+        return result;
+    }
+}
+```
+
+---
+
+### ✅ Movie.java (refactored)
+
+```java
+public class Movie {
+    public static final int REGULAR = 0;
+    public static final int NEW_RELEASE = 1;
+    public static final int CHILDREN = 2;
+    public static final int BEST_SELLER = 3; // placeholder cho commit 4
+
+    private String title;
+    private Price price;
+
+    public Movie(String title, int priceCode) {
+        this.title = title;
+        setPriceCode(priceCode);
+    }
+
+    public int getPriceCode() {
+        return price.getPriceCode();
+    }
+
+    public void setPriceCode(int priceCode) {
+        switch (priceCode) {
+            case REGULAR:
+                price = new RegularPrice();
+                break;
+            case NEW_RELEASE:
+                price = new NewReleasePrice();
+                break;
+            case CHILDREN:
+                price = new ChildrenPrice();
+                break;
+            default:
+                throw new IllegalArgumentException("Invalid price code");
+        }
+    }
+
+    public String getTitle() {
+        return title;
+    }
+
+    public double getCharge(int daysRented) {
+        return price.getCharge(daysRented);
+    }
+
+    public int getFrequentRenterPoints(int daysRented) {
+        return price.getFrequentRenterPoints(daysRented);
+    }
+}
+```
+
+---
+
+### ✅ Customer.java (refactored — clean)
+
+```java
+import java.util.Enumeration;
+import java.util.Vector;
+
+public class Customer {
+    private String name;
+    private Vector<Rental> rentals = new Vector<>();
+
+    public Customer(String name) {
+        this.name = name;
+    }
+
+    public void addRental(Rental rental) {
+        rentals.add(rental);
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public String statement() {
+        double totalAmount = 0;
+        int frequentRenterPoints = 0;
+        Enumeration<Rental> enumRentals = rentals.elements();
+        StringBuilder result = new StringBuilder("Rental Record for " + getName() + "\n");
+
+        while (enumRentals.hasMoreElements()) {
+            Rental each = enumRentals.nextElement();
+
+            double thisAmount = each.getMovie().getCharge(each.getDaysRented());
+            frequentRenterPoints += each.getMovie().getFrequentRenterPoints(each.getDaysRented());
+
+            result.append("\t")
+                    .append(each.getMovie().getTitle())
+                    .append("\t")
+                    .append(thisAmount)
+                    .append("\n");
+
+            totalAmount += thisAmount;
+        }
+
+        result.append("Amount owed is ").append(totalAmount).append("\n");
+        result.append("You earned ").append(frequentRenterPoints).append(" frequent renter points");
+
+        return result.toString();
+    }
+}
+```
+
+---
+
+### ✅ Rental.java (unchanged)
+
+```java
+public class Rental {
+    private Movie movie;
+    private int daysRented;
+
+    public Rental(Movie movie, int daysRented) {
+        this.movie = movie;
+        this.daysRented = daysRented;
+    }
+
+    public int getDaysRented() {
+        return daysRented;
+    }
+
+    public Movie getMovie() {
+        return movie;
+    }
+}
+```
+
+---
+
+### ✅ RentalManager.java (optional demo)
+
+```java
+public class RentalManager {
+    public static void main(String[] args) {
+        Customer customer = new Customer("Hong");
+        customer.addRental(new Rental(new Movie("Inception", Movie.REGULAR), 3));
+        customer.addRental(new Rental(new Movie("Frozen", Movie.CHILDREN), 4));
+        customer.addRental(new Rental(new Movie("Oppenheimer", Movie.NEW_RELEASE), 2));
+
+        System.out.println(customer.statement());
+    }
+}
+```
+
+---
+
+## 🧪 Test verification
+
+Tất cả test từ **Commit 1** phải chạy PASS — chứng tỏ việc refactor đã **bảo toàn hành vi gốc**.
+Nếu bạn dùng JUnit 5, chỉ cần chạy:
+
+```bash
+mvn test
+# hoặc
+gradle test
+```
+
+---
+
+## 🧾 Commit message gợi ý
+
+```
+refactor: replace conditional with Price polymorphism in Movie and Customer
+```
+
+---
+
+## ✅ Kết quả sau Commit 3
+
+| Trước                      | Sau                                    |
+| -------------------------- | -------------------------------------- |
+| Switch-case trong Customer | ✅ Loại bỏ hoàn toàn                    |
+| Tính phí & điểm thưởng     | ✅ Di chuyển sang Price subclasses      |
+| Code dễ mở rộng            | ✅ Chuẩn bị cho “Bestseller” ở commit 4 |
+| Logic gốc                  | ✅ Giữ nguyên, test pass toàn bộ        |
+
+---
+
+Bạn có muốn mình tiếp tục tạo **Commit 4 (Add Bestseller type + test)** ngay sau đây không?
+Đây là phần bạn sẽ thêm feature mới thật sự (phí $5/day và $7.5/day, 5 points/day).
