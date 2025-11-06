@@ -1,0 +1,283 @@
+Rất tốt 💪 — bây giờ ta đi tiếp đến **Commit 4: “Add Bestseller movie type”**,
+nơi bạn sẽ **mở rộng hệ thống bằng cách thêm một loại phim mới** mà **không chạm vào logic hiện có**, đúng tinh thần **Open/Closed Principle (OCP)**.
+
+---
+
+## 🎯 Mục tiêu Commit 4
+
+> ✅ Thêm loại phim **BESTSELLER**
+> ✅ Áp dụng quy tắc tính phí và điểm thưởng riêng
+> ✅ Không thay đổi code logic hiện tại (chỉ mở rộng)
+> ✅ Viết test xác nhận hành vi đúng
+
+---
+
+## 💰 Yêu cầu nghiệp vụ (“Bestseller” type)
+
+| Rule                       | Description                                                   |
+| -------------------------- | ------------------------------------------------------------- |
+| **Rental charge**          | $5 per day for the first 2 days, then $7.5 per day after that |
+| **Frequent renter points** | 5 points per day                                              |
+
+---
+
+## 🧱 File thay đổi / thêm mới
+
+### ✅ Movie.java (chỉ thêm hằng số và case mới)
+
+```java
+public class Movie {
+    public static final int REGULAR = 0;
+    public static final int NEW_RELEASE = 1;
+    public static final int CHILDREN = 2;
+    public static final int BEST_SELLER = 3; // ✅ new type
+
+    private final String title;
+    private Price price;
+
+    public Movie(String title, int priceCode) {
+        this.title = title;
+        setPriceCode(priceCode);
+    }
+
+    public int getPriceCode() {
+        return price.getPriceCode();
+    }
+
+    public void setPriceCode(int priceCode) {
+        switch (priceCode) {
+            case REGULAR -> price = new RegularPrice();
+            case NEW_RELEASE -> price = new NewReleasePrice();
+            case CHILDREN -> price = new ChildrenPrice();
+            case BEST_SELLER -> price = new BestsellerPrice(); // ✅ new subclass
+            default -> throw new IllegalArgumentException("Invalid price code: " + priceCode);
+        }
+    }
+
+    public String getTitle() {
+        return title;
+    }
+
+    public double getCharge(int daysRented) {
+        return price.getCharge(daysRented);
+    }
+
+    public int getFrequentRenterPoints(int daysRented) {
+        return price.getFrequentRenterPoints(daysRented);
+    }
+}
+```
+
+---
+
+### ✅ BestsellerPrice.java (new file)
+
+```java
+/**
+ * BestsellerPrice - new movie type.
+ * Expensive, so higher charge and more points.
+ */
+public class BestsellerPrice extends Price {
+
+    @Override
+    public int getPriceCode() {
+        return Movie.BEST_SELLER;
+    }
+
+    @Override
+    public double getCharge(int daysRented) {
+        if (daysRented <= 2) {
+            return daysRented * 5.0;
+        } else {
+            return (2 * 5.0) + (daysRented - 2) * 7.5;
+        }
+    }
+
+    @Override
+    public int getFrequentRenterPoints(int daysRented) {
+        return daysRented * 5;
+    }
+}
+```
+
+---
+
+### ✅ Rental.java (no change, polymorphism handles it)
+
+```java
+public class Rental {
+    private final Movie movie;
+    private final int daysRented;
+
+    public Rental(Movie movie, int daysRented) {
+        this.movie = movie;
+        this.daysRented = daysRented;
+    }
+
+    public int getDaysRented() {
+        return daysRented;
+    }
+
+    public Movie getMovie() {
+        return movie;
+    }
+
+    public double getCharge() {
+        return movie.getCharge(daysRented);
+    }
+
+    public int getFrequentRenterPoints() {
+        return movie.getFrequentRenterPoints(daysRented);
+    }
+}
+```
+
+---
+
+### ✅ Customer.java (no logic change — still perfectly clean)
+
+```java
+import java.util.Enumeration;
+import java.util.Vector;
+
+public class Customer {
+    private final String name;
+    private final Vector<Rental> rentals = new Vector<>();
+
+    public Customer(String name) {
+        this.name = name;
+    }
+
+    public void addRental(Rental rental) {
+        rentals.add(rental);
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public String statement() {
+        double totalAmount = 0;
+        int frequentRenterPoints = 0;
+        StringBuilder result = new StringBuilder("Rental Record for " + getName() + "\n");
+
+        Enumeration<Rental> elements = rentals.elements();
+        while (elements.hasMoreElements()) {
+            Rental rental = elements.nextElement();
+
+            double thisAmount = rental.getCharge();
+            frequentRenterPoints += rental.getFrequentRenterPoints();
+
+            result.append("\t")
+                    .append(rental.getMovie().getTitle())
+                    .append("\t")
+                    .append(thisAmount)
+                    .append("\n");
+
+            totalAmount += thisAmount;
+        }
+
+        result.append("Amount owed is ").append(totalAmount).append("\n");
+        result.append("You earned ").append(frequentRenterPoints).append(" frequent renter points");
+        return result.toString();
+    }
+}
+```
+
+---
+
+## ✅ New Test: Bestseller type
+
+**File:** `CustomerTest.java`
+
+```java
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.*;
+
+public class CustomerTest {
+
+    @Test
+    void testBestsellerRentalForTwoDays() {
+        Customer customer = new Customer("Liam");
+        Movie movie = new Movie("Top Gun Maverick", Movie.BEST_SELLER);
+        customer.addRental(new Rental(movie, 2));
+
+        String statement = customer.statement();
+
+        // Expected: 2 days * $5 = 10
+        assertTrue(statement.contains("Amount owed is 10.0"));
+        // 2 days * 5 points/day = 10 points
+        assertTrue(statement.contains("You earned 10 frequent renter points"));
+    }
+
+    @Test
+    void testBestsellerRentalMoreThanTwoDays() {
+        Customer customer = new Customer("Emma");
+        Movie movie = new Movie("Avengers: Endgame", Movie.BEST_SELLER);
+        customer.addRental(new Rental(movie, 4));
+
+        String statement = customer.statement();
+
+        // Expected: 2 * 5 + 2 * 7.5 = 25.0
+        assertTrue(statement.contains("Amount owed is 25.0"));
+        // 4 days * 5 = 20 points
+        assertTrue(statement.contains("You earned 20 frequent renter points"));
+    }
+
+    @Test
+    void testMixedRentalWithBestseller() {
+        Customer customer = new Customer("Noah");
+        customer.addRental(new Rental(new Movie("Frozen", Movie.CHILDREN), 3));    // 1.5
+        customer.addRental(new Rental(new Movie("Top Gun Maverick", Movie.BEST_SELLER), 3)); // 2*5+1*7.5=17.5
+
+        String statement = customer.statement();
+
+        // total = 1.5 + 17.5 = 19.0
+        assertTrue(statement.contains("Amount owed is 19.0"));
+        // points = 1 (child) + 15 (bestseller)
+        assertTrue(statement.contains("You earned 16 frequent renter points"));
+    }
+}
+```
+
+---
+
+## 🧾 Commit message suggestion
+
+```
+feat: add Bestseller movie type with custom charge and frequent renter points
+
+- Added new Price subclass: BestsellerPrice
+- Charge rule: $5/day for first 2 days, $7.5/day thereafter
+- Frequent renter points: 5 points/day
+- Extended Movie with BEST_SELLER type
+- Added comprehensive unit tests for Bestseller movies
+```
+
+---
+
+## 🧹 Clean Code & Design Principles Applied
+
+| Principle                         | Application                                             |
+| --------------------------------- | ------------------------------------------------------- |
+| **OCP (Open/Closed Principle)**   | Added `BestsellerPrice` without touching existing logic |
+| **SRP (Single Responsibility)**   | `Price` subclasses handle their own pricing rules       |
+| **Low Coupling**                  | `Customer` doesn’t know about pricing details           |
+| **High Cohesion**                 | Each class has one clear purpose                        |
+| **Test-Driven Development (TDD)** | Tests written to confirm new behavior immediately       |
+| **Code Readability**              | Naming matches business logic clearly                   |
+
+---
+
+## ✅ After Commit 4 — What You Achieved
+
+* System can now handle 4 movie types (`REGULAR`, `NEW_RELEASE`, `CHILDREN`, `BEST_SELLER`)
+* Adding a 5th type (e.g., “Classic”) would take **only 1 new class + 1 line in switch**
+* All old tests still pass
+* New tests for Bestseller pass
+* Code is clean, polymorphic, and fully extensible 🎉
+
+---
+
+Bạn muốn mình tiếp tục **Commit 5** không (tạo `htmlStatement()` + refactor trùng lặp bằng Template Method)?
+Commit 5 là phần cuối cùng của Video Rental kata (nâng cấp đầu ra HTML).
