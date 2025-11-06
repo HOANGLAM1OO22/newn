@@ -1,0 +1,328 @@
+Rất tuyệt 👏 — giờ chúng ta bước sang **Commit 3**, bước refactor quan trọng nhất trong toàn bài tập *Video Rental Kata* — bước **“Replace Conditional with Polymorphism”** theo đúng tinh thần *Martin Fowler – Refactoring* và *Clean Code (Robert C. Martin)*.
+
+---
+
+## 🎯 Mục tiêu Commit 3
+
+> Loại bỏ `switch-case` khỏi `Customer`
+> → Di chuyển logic tính giá và điểm thưởng vào `Movie` (và `Price`)
+> → Đạt thiết kế hướng đối tượng, dễ mở rộng, dễ test, không vi phạm **Open/Closed Principle (OCP)**.
+
+---
+
+## ⚙️ Thiết kế mới (theo flow Martin Fowler)
+
+### 1️⃣ `Movie` không còn giữ `priceCode` dạng `int`, mà dùng **Price object**
+
+### 2️⃣ Tạo **Price** là abstract class, và subclass:
+
+`RegularPrice`, `NewReleasePrice`, `ChildrenPrice`
+
+### 3️⃣ `Movie` ủy quyền (delegate) việc tính giá & điểm thưởng cho `Price`
+
+### 4️⃣ `Customer` chỉ gọi `rental.getCharge()` và `rental.getFrequentRenterPoints()`
+
+---
+
+## 🧱 Cấu trúc package
+
+```
+src/
+ ├── Customer.java
+ ├── Movie.java
+ ├── Price.java
+ ├── RegularPrice.java
+ ├── NewReleasePrice.java
+ ├── ChildrenPrice.java
+ ├── Rental.java
+ └── RentalManager.java
+```
+
+---
+
+## ✅ Full Refactored Code (Commit 3 – Clean Code)
+
+### 🎬 Movie.java
+
+```java
+public class Movie {
+    public static final int REGULAR = 0;
+    public static final int NEW_RELEASE = 1;
+    public static final int CHILDREN = 2;
+
+    private final String title;
+    private Price price;
+
+    public Movie(String title, int priceCode) {
+        this.title = title;
+        setPriceCode(priceCode);
+    }
+
+    public int getPriceCode() {
+        return price.getPriceCode();
+    }
+
+    public void setPriceCode(int priceCode) {
+        switch (priceCode) {
+            case REGULAR -> price = new RegularPrice();
+            case NEW_RELEASE -> price = new NewReleasePrice();
+            case CHILDREN -> price = new ChildrenPrice();
+            default -> throw new IllegalArgumentException("Invalid price code: " + priceCode);
+        }
+    }
+
+    public String getTitle() {
+        return title;
+    }
+
+    /** Delegate charge calculation to Price subclass */
+    public double getCharge(int daysRented) {
+        return price.getCharge(daysRented);
+    }
+
+    /** Delegate frequent renter point calculation to Price subclass */
+    public int getFrequentRenterPoints(int daysRented) {
+        return price.getFrequentRenterPoints(daysRented);
+    }
+}
+```
+
+---
+
+### 💰 Price.java (abstract superclass)
+
+```java
+/**
+ * Abstract Price class — represents pricing strategy.
+ * Each subclass defines its own charge rule.
+ */
+public abstract class Price {
+    public abstract int getPriceCode();
+
+    public abstract double getCharge(int daysRented);
+
+    /** Default rule: 1 point per rental */
+    public int getFrequentRenterPoints(int daysRented) {
+        return 1;
+    }
+}
+```
+
+---
+
+### 🧩 RegularPrice.java
+
+```java
+public class RegularPrice extends Price {
+
+    @Override
+    public int getPriceCode() {
+        return Movie.REGULAR;
+    }
+
+    @Override
+    public double getCharge(int daysRented) {
+        double result = 2.0;
+        if (daysRented > 2) {
+            result += (daysRented - 2) * 1.5;
+        }
+        return result;
+    }
+}
+```
+
+---
+
+### 🆕 NewReleasePrice.java
+
+```java
+public class NewReleasePrice extends Price {
+
+    @Override
+    public int getPriceCode() {
+        return Movie.NEW_RELEASE;
+    }
+
+    @Override
+    public double getCharge(int daysRented) {
+        return daysRented * 3.0;
+    }
+
+    @Override
+    public int getFrequentRenterPoints(int daysRented) {
+        // Bonus for 2+ days new release
+        return (daysRented > 1) ? 2 : 1;
+    }
+}
+```
+
+---
+
+### 🧒 ChildrenPrice.java
+
+```java
+public class ChildrenPrice extends Price {
+
+    @Override
+    public int getPriceCode() {
+        return Movie.CHILDREN;
+    }
+
+    @Override
+    public double getCharge(int daysRented) {
+        double result = 1.5;
+        if (daysRented > 3) {
+            result += (daysRented - 3) * 1.5;
+        }
+        return result;
+    }
+}
+```
+
+---
+
+### 🎟 Rental.java
+
+```java
+public class Rental {
+    private final Movie movie;
+    private final int daysRented;
+
+    public Rental(Movie movie, int daysRented) {
+        this.movie = movie;
+        this.daysRented = daysRented;
+    }
+
+    public int getDaysRented() {
+        return daysRented;
+    }
+
+    public Movie getMovie() {
+        return movie;
+    }
+
+    /** Calculate rental charge by delegating to Movie */
+    public double getCharge() {
+        return movie.getCharge(daysRented);
+    }
+
+    /** Calculate frequent renter points by delegating to Movie */
+    public int getFrequentRenterPoints() {
+        return movie.getFrequentRenterPoints(daysRented);
+    }
+}
+```
+
+---
+
+### 👤 Customer.java (now super clean)
+
+```java
+import java.util.Enumeration;
+import java.util.Vector;
+
+/**
+ * Customer aggregates Rentals and produces statements.
+ * Calculation logic is fully delegated.
+ */
+public class Customer {
+    private final String name;
+    private final Vector<Rental> rentals = new Vector<>();
+
+    public Customer(String name) {
+        this.name = name;
+    }
+
+    public void addRental(Rental rental) {
+        rentals.add(rental);
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public String statement() {
+        double totalAmount = 0;
+        int frequentRenterPoints = 0;
+        StringBuilder result = new StringBuilder("Rental Record for " + getName() + "\n");
+
+        Enumeration<Rental> elements = rentals.elements();
+        while (elements.hasMoreElements()) {
+            Rental rental = elements.nextElement();
+
+            double thisAmount = rental.getCharge();
+            frequentRenterPoints += rental.getFrequentRenterPoints();
+
+            result.append("\t")
+                    .append(rental.getMovie().getTitle())
+                    .append("\t")
+                    .append(thisAmount)
+                    .append("\n");
+
+            totalAmount += thisAmount;
+        }
+
+        result.append("Amount owed is ").append(totalAmount).append("\n");
+        result.append("You earned ").append(frequentRenterPoints).append(" frequent renter points");
+        return result.toString();
+    }
+}
+```
+
+---
+
+### ▶️ RentalManager.java (for manual run)
+
+```java
+public class RentalManager {
+    public static void main(String[] args) {
+        Customer customer = new Customer("Hong");
+
+        customer.addRental(new Rental(new Movie("Inception", Movie.REGULAR), 3));
+        customer.addRental(new Rental(new Movie("Oppenheimer", Movie.NEW_RELEASE), 2));
+        customer.addRental(new Rental(new Movie("Frozen", Movie.CHILDREN), 4));
+
+        System.out.println(customer.statement());
+    }
+}
+```
+
+---
+
+## 🧹 Clean Code Notes (Martin & Uncle Bob style)
+
+| Principle                           | How It’s Applied                                                             |
+| ----------------------------------- | ---------------------------------------------------------------------------- |
+| **Single Responsibility Principle** | `Movie` handles pricing, `Customer` handles statement, `Rental` acts as link |
+| **Open/Closed Principle**           | Easy to add `BestsellerPrice` later — no switch modification                 |
+| **Meaningful Names**                | `getCharge()`, `getFrequentRenterPoints()` clearly describe intention        |
+| **Avoid Code Duplication**          | Calculation logic centralized in subclasses                                  |
+| **Polymorphism over Conditionals**  | Each `Price` type defines its own behavior                                   |
+| **Small Functions, Cohesion**       | Every method does one thing well                                             |
+
+---
+
+## 🧾 Commit message suggestion
+
+```
+refactor: replace conditional with polymorphism via Price hierarchy for Movie pricing
+
+- Introduced abstract class Price and subclasses RegularPrice, NewReleasePrice, ChildrenPrice
+- Moved all charge and frequent renter point logic from Customer to Price classes
+- Simplified Customer.statement() to use delegation
+- Prepared for adding new movie types (e.g., Bestseller)
+```
+
+---
+
+## ✅ Expected result after commit
+
+* All tests from **Commit 1** still PASS
+* Code now completely polymorphic
+* `Customer.statement()` clear, readable, and short
+* Ready for **Commit 4**: Add `BestsellerPrice` easily with no code duplication
+
+---
+
+Bạn muốn mình tiếp tục **Commit 4 (feat: add Bestseller movie type with tests)** ngay sau đây không?
+Nó sẽ dựa trực tiếp trên kiến trúc polymorphism này (rất ngắn gọn và đẹp).
