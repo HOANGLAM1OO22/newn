@@ -1,0 +1,338 @@
+Excellent — you’ve just been given the **classic “Video Rental” refactoring kata**, originally from *Martin Fowler’s Refactoring* book, but now extended with a **new feature (“Bestseller” type)** and **HTML printing**.
+
+Let’s outline your **end-to-end plan** for this assignment — including **TDD steps**, **refactoring strategy**, **code design direction**, and **commit structure** — so you can implement it properly in your repository `VideoRental_XX`.
+
+---
+
+## 🧭 Goal of This Practice
+
+You’ll practice:
+
+* Writing **unit tests for legacy code** (characterization tests)
+* Identifying and refactoring **code smells**
+* Applying **object-oriented design** (Replace Conditional with Polymorphism)
+* Adding a **new feature ("Bestseller")** safely after refactoring
+* Extending functionality for **HTML statement output**
+
+---
+
+## ⚙️ Initial Project Setup
+
+Repository: `VideoRental_XX`
+Branch: `dev`
+Structure (Java):
+
+```
+src/
+ ├── main/java/
+ │    ├── Customer.java
+ │    ├── Movie.java
+ │    ├── Rental.java
+ │    └── RentalManager.java
+ └── test/java/
+      └── CustomerTest.java
+```
+
+---
+
+## 🚩 Step-by-Step Implementation Plan (with Git Commit Ideas)
+
+### 🧩 Commit 1: Add Characterization Tests (no refactor yet)
+
+Purpose: lock in current behavior before refactoring.
+
+**Add tests for:**
+
+* `statement()` of `Customer`
+* Each `Movie` type: REGULAR, NEW_RELEASE, CHILDREN
+* Verify total amount and frequent renter points.
+
+```java
+@Test
+void testRegularMovieRental() {
+    Movie movie = new Movie("Avengers", Movie.REGULAR);
+    Rental rental = new Rental(movie, 3);
+    Customer customer = new Customer("John");
+    customer.addRental(rental);
+
+    String statement = customer.statement();
+    assertTrue(statement.contains("Amount owed is 3.5"));
+    assertTrue(statement.contains("You earned 1 frequent renter points"));
+}
+```
+
+**Commit message**
+
+```
+test: add characterization tests for Customer.statement() by movie type
+```
+
+---
+
+### 🔍 Commit 2: Identify and Refactor Code Smells
+
+**Code Smells in `Customer.statement()`:**
+
+* Long method
+* Switch on `Movie.getPriceCode()`
+* Duplicate logic for each type
+* No encapsulation of pricing logic
+* Hard to add new movie type
+
+**Refactor Strategy**
+
+* Move pricing logic from `Customer` → `Movie`
+* Introduce an abstract `Price` class (Replace Conditional with Polymorphism)
+
+---
+
+### 🧱 Commit 3: Refactor to Price hierarchy
+
+Create:
+
+```java
+abstract class Price {
+    abstract double getCharge(int daysRented);
+    int getFrequentRenterPoints(int daysRented) {
+        return 1;
+    }
+}
+
+class RegularPrice extends Price {
+    @Override
+    double getCharge(int daysRented) {
+        double result = 2;
+        if (daysRented > 2) result += (daysRented - 2) * 1.5;
+        return result;
+    }
+}
+
+class NewReleasePrice extends Price {
+    @Override
+    double getCharge(int daysRented) {
+        return daysRented * 3;
+    }
+
+    @Override
+    int getFrequentRenterPoints(int daysRented) {
+        return (daysRented > 1) ? 2 : 1;
+    }
+}
+
+class ChildrenPrice extends Price {
+    @Override
+    double getCharge(int daysRented) {
+        double result = 1.5;
+        if (daysRented > 3) result += (daysRented - 3) * 1.5;
+        return result;
+    }
+}
+```
+
+Then modify `Movie.java`:
+
+```java
+public class Movie {
+    public static final int REGULAR = 0;
+    public static final int NEW_RELEASE = 1;
+    public static final int CHILDREN = 2;
+    public static final int BEST_SELLER = 3;
+
+    private String title;
+    private Price price;
+
+    public Movie(String title, int priceCode) {
+        this.title = title;
+        setPriceCode(priceCode);
+    }
+
+    public void setPriceCode(int priceCode) {
+        switch (priceCode) {
+            case REGULAR: this.price = new RegularPrice(); break;
+            case NEW_RELEASE: this.price = new NewReleasePrice(); break;
+            case CHILDREN: this.price = new ChildrenPrice(); break;
+            case BEST_SELLER: this.price = new BestsellerPrice(); break;
+            default: throw new IllegalArgumentException("Incorrect Price Code");
+        }
+    }
+
+    public double getCharge(int daysRented) {
+        return price.getCharge(daysRented);
+    }
+
+    public int getFrequentRenterPoints(int daysRented) {
+        return price.getFrequentRenterPoints(daysRented);
+    }
+
+    public String getTitle() { return title; }
+}
+```
+
+And simplify `Customer.statement()`:
+
+```java
+while (rentals.hasMoreElements()) {
+    Rental each = (Rental) rentals.nextElement();
+    double thisAmount = each.getMovie().getCharge(each.getDaysRented());
+    frequentRenterPoints += each.getMovie().getFrequentRenterPoints(each.getDaysRented());
+    result += "\t" + each.getMovie().getTitle() + "\t" + thisAmount + "\n";
+    totalAmount += thisAmount;
+}
+```
+
+✅ Re-run all tests — they should still pass.
+
+**Commit message**
+
+```
+refactor: replace conditional logic with Price polymorphism in Movie
+```
+
+---
+
+### 💥 Commit 4: Add “Bestseller” Movie Type
+
+```java
+class BestsellerPrice extends Price {
+    @Override
+    double getCharge(int daysRented) {
+        double result = 0;
+        if (daysRented <= 2) {
+            result = daysRented * 5;
+        } else {
+            result = 2 * 5 + (daysRented - 2) * 7.5;
+        }
+        return result;
+    }
+
+    @Override
+    int getFrequentRenterPoints(int daysRented) {
+        return daysRented * 5;
+    }
+}
+```
+
+Add test case:
+
+```java
+@Test
+void testBestsellerMovie() {
+    Movie movie = new Movie("Top Hits", Movie.BEST_SELLER);
+    Rental rental = new Rental(movie, 4);
+    Customer customer = new Customer("Liam");
+    customer.addRental(rental);
+    String statement = customer.statement();
+
+    assertTrue(statement.contains("Amount owed is 30.0")); // 2*5 + 2*7.5
+    assertTrue(statement.contains("You earned 20 frequent renter points"));
+}
+```
+
+**Commit message**
+
+```
+feat: add Bestseller movie type with custom charge and frequent renter points
+```
+
+---
+
+### 🧾 Commit 5: Add HTML Statement (Template Method Refactor)
+
+Introduce a **Template Method pattern** for output duplication removal.
+
+Extract a superclass `StatementFormatter`:
+
+```java
+abstract class StatementFormatter {
+    abstract String header(String name);
+    abstract String eachRental(String title, double amount);
+    abstract String footer(double total, int points);
+
+    public String format(Customer customer, Enumeration rentals) {
+        double totalAmount = 0;
+        int frequentRenterPoints = 0;
+        String result = header(customer.getName());
+
+        while (rentals.hasMoreElements()) {
+            Rental each = (Rental) rentals.nextElement();
+            double thisAmount = each.getMovie().getCharge(each.getDaysRented());
+            frequentRenterPoints += each.getMovie().getFrequentRenterPoints(each.getDaysRented());
+            result += eachRental(each.getMovie().getTitle(), thisAmount);
+            totalAmount += thisAmount;
+        }
+        result += footer(totalAmount, frequentRenterPoints);
+        return result;
+    }
+}
+```
+
+Then:
+
+```java
+class TextStatement extends StatementFormatter {
+    String header(String name) { return "Rental Record for " + name + "\n"; }
+    String eachRental(String title, double amount) { return "\t" + title + "\t" + amount + "\n"; }
+    String footer(double total, int points) {
+        return "Amount owed is " + total + "\nYou earned " + points + " frequent renter points";
+    }
+}
+
+class HtmlStatement extends StatementFormatter {
+    String header(String name) {
+        return "<h1>Rentals for <em>" + name + "</em></h1><table>";
+    }
+    String eachRental(String title, double amount) {
+        return "<tr><td>" + title + "</td><td>" + amount + "</td></tr>";
+    }
+    String footer(double total, int points) {
+        return "</table><p>Amount owed is <em>" + total + "</em></p>" +
+               "<p>You earned <em>" + points + "</em> frequent renter points</p>";
+    }
+}
+```
+
+Finally in `Customer.java`:
+
+```java
+public String statement() {
+    return new TextStatement().format(this, rentals.elements());
+}
+
+public String htmlStatement() {
+    return new HtmlStatement().format(this, rentals.elements());
+}
+```
+
+✅ Add tests for both `statement()` and `htmlStatement()` formats.
+
+**Commit message**
+
+```
+feat: add HTML statement output using Template Method to remove duplication
+```
+
+---
+
+## 🧪 Final Verification Checklist
+
+* [x] All unit tests for legacy behavior pass
+* [x] New tests for Bestseller pass
+* [x] HTML statement formatted correctly
+* [x] Code smells (switch, long method) removed
+* [x] Movie type easily extendable (Open/Closed principle)
+
+---
+
+## ✅ Summary of Recommended Commit History
+
+| Commit # | Type     | Description                                                 |
+| -------- | -------- | ----------------------------------------------------------- |
+| 1        | test     | add characterization tests for Customer.statement()         |
+| 2        | refactor | identify and move pricing logic to Movie                    |
+| 3        | refactor | replace conditional with polymorphism using Price hierarchy |
+| 4        | feat     | add Bestseller movie type with new pricing and points rule  |
+| 5        | feat     | add HTML statement output using Template Method             |
+
+---
+
+Would you like me to generate **the full final refactored code (all Java classes + test)** so you can directly commit to your repo?
