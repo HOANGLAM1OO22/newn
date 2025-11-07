@@ -1,0 +1,361 @@
+Rất chuẩn 💪 — nếu mục tiêu của bạn là **code thật sạch, mở rộng dễ**, thì đúng rồi:
+→ **nên đưa `PriceFactory`** (và tùy chọn `StatementFactory`) **ngay từ Commit 3**, khi bạn đã refactor `switch` → polymorphism.
+
+Cách này giúp bạn **xóa luôn switch-case trong `Movie`** cùng lúc với việc tách `Price` hierarchy, để `Movie` chỉ cần *“gọi factory”* chứ không biết chi tiết subclass nào được tạo.
+
+---
+
+## 🧭 Mục tiêu Commit 3 (phiên bản nâng cao với Factory)
+
+> * Thay thế switch-case trong `Movie.setPriceCode()` bằng **PriceFactory**
+> * Giữ tinh thần **Replace Conditional with Polymorphism**
+> * Đạt **Open/Closed Principle (OCP)** ngay từ bước refactor đầu tiên
+
+---
+
+## ✅ Full Code Commit 3 (Refactor + Factory)
+
+### 📦 Package layout
+
+```
+videorental/
+ ├── customer/
+ │    └── Customer.java
+ ├── movie/
+ │    ├── Movie.java
+ │    ├── Price.java
+ │    ├── RegularPrice.java
+ │    ├── NewReleasePrice.java
+ │    ├── ChildrenPrice.java
+ │    └── PriceFactory.java   ✅ new
+ ├── rental/
+ │    ├── Rental.java
+ │    └── RentalManager.java
+```
+
+---
+
+### 🎬 `Movie.java`
+
+```java
+package videorental.movie;
+
+/**
+ * Movie class represents a film with a specific pricing strategy.
+ * It delegates charge and frequent renter points calculation
+ * to a Price object, created via PriceFactory.
+ */
+public class Movie {
+    public static final int REGULAR = 0;
+    public static final int NEW_RELEASE = 1;
+    public static final int CHILDREN = 2;
+
+    private final String title;
+    private Price price;
+
+    public Movie(String title, int priceCode) {
+        this.title = title;
+        this.price = PriceFactory.create(priceCode);
+    }
+
+    public String getTitle() {
+        return title;
+    }
+
+    public double getCharge(int daysRented) {
+        return price.getCharge(daysRented);
+    }
+
+    public int getFrequentRenterPoints(int daysRented) {
+        return price.getFrequentRenterPoints(daysRented);
+    }
+
+    public void setPriceCode(int priceCode) {
+        this.price = PriceFactory.create(priceCode);
+    }
+
+    public int getPriceCode() {
+        return price.getPriceCode();
+    }
+}
+```
+
+---
+
+### 🏭 `PriceFactory.java`
+
+```java
+package videorental.movie;
+
+/**
+ * Factory pattern for creating Price instances.
+ * Keeps Movie class free of switch statements.
+ */
+public class PriceFactory {
+
+    private PriceFactory() {} // Prevent instantiation
+
+    public static Price create(int priceCode) {
+        return switch (priceCode) {
+            case Movie.REGULAR -> new RegularPrice();
+            case Movie.NEW_RELEASE -> new NewReleasePrice();
+            case Movie.CHILDREN -> new ChildrenPrice();
+            default -> throw new IllegalArgumentException("Unknown price code: " + priceCode);
+        };
+    }
+}
+```
+
+---
+
+### 💰 `Price.java`
+
+```java
+package videorental.movie;
+
+/**
+ * Abstract Price class — defines the interface for pricing strategies.
+ */
+public abstract class Price {
+    public abstract int getPriceCode();
+    public abstract double getCharge(int daysRented);
+
+    public int getFrequentRenterPoints(int daysRented) {
+        return 1;
+    }
+}
+```
+
+---
+
+### 🧩 `RegularPrice.java`
+
+```java
+package videorental.movie;
+
+public class RegularPrice extends Price {
+
+    @Override
+    public int getPriceCode() {
+        return Movie.REGULAR;
+    }
+
+    @Override
+    public double getCharge(int daysRented) {
+        double result = 2.0;
+        if (daysRented > 2) {
+            result += (daysRented - 2) * 1.5;
+        }
+        return result;
+    }
+}
+```
+
+---
+
+### 🆕 `NewReleasePrice.java`
+
+```java
+package videorental.movie;
+
+public class NewReleasePrice extends Price {
+
+    @Override
+    public int getPriceCode() {
+        return Movie.NEW_RELEASE;
+    }
+
+    @Override
+    public double getCharge(int daysRented) {
+        return daysRented * 3.0;
+    }
+
+    @Override
+    public int getFrequentRenterPoints(int daysRented) {
+        return (daysRented > 1) ? 2 : 1;
+    }
+}
+```
+
+---
+
+### 🧒 `ChildrenPrice.java`
+
+```java
+package videorental.movie;
+
+public class ChildrenPrice extends Price {
+
+    @Override
+    public int getPriceCode() {
+        return Movie.CHILDREN;
+    }
+
+    @Override
+    public double getCharge(int daysRented) {
+        double result = 1.5;
+        if (daysRented > 3) {
+            result += (daysRented - 3) * 1.5;
+        }
+        return result;
+    }
+}
+```
+
+---
+
+### 🎟 `Rental.java`
+
+```java
+package videorental.rental;
+
+import videorental.movie.Movie;
+
+/**
+ * Rental represents a customer's rental of a specific movie.
+ * It delegates pricing to the Movie object.
+ */
+public class Rental {
+    private final Movie movie;
+    private final int daysRented;
+
+    public Rental(Movie movie, int daysRented) {
+        this.movie = movie;
+        this.daysRented = daysRented;
+    }
+
+    public int getDaysRented() {
+        return daysRented;
+    }
+
+    public Movie getMovie() {
+        return movie;
+    }
+
+    public double getCharge() {
+        return movie.getCharge(daysRented);
+    }
+
+    public int getFrequentRenterPoints() {
+        return movie.getFrequentRenterPoints(daysRented);
+    }
+}
+```
+
+---
+
+### 👤 `Customer.java`
+
+```java
+package videorental.customer;
+
+import videorental.rental.Rental;
+import java.util.Enumeration;
+import java.util.Vector;
+
+/**
+ * Customer holds a collection of rentals and can produce billing statements.
+ */
+public class Customer {
+    private final String name;
+    private final Vector<Rental> rentals = new Vector<>();
+
+    public Customer(String name) {
+        this.name = name;
+    }
+
+    public void addRental(Rental rental) {
+        rentals.add(rental);
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public String statement() {
+        double totalAmount = 0;
+        int frequentRenterPoints = 0;
+        StringBuilder result = new StringBuilder("Rental Record for " + getName() + "\n");
+
+        Enumeration<Rental> elements = rentals.elements();
+        while (elements.hasMoreElements()) {
+            Rental rental = elements.nextElement();
+
+            double thisAmount = rental.getCharge();
+            frequentRenterPoints += rental.getFrequentRenterPoints();
+
+            result.append("\t")
+                  .append(rental.getMovie().getTitle())
+                  .append("\t")
+                  .append(thisAmount)
+                  .append("\n");
+
+            totalAmount += thisAmount;
+        }
+
+        result.append("Amount owed is ").append(totalAmount).append("\n");
+        result.append("You earned ").append(frequentRenterPoints).append(" frequent renter points");
+        return result.toString();
+    }
+}
+```
+
+---
+
+### ▶️ `RentalManager.java` (demo run)
+
+```java
+package videorental.rental;
+
+import videorental.customer.Customer;
+import videorental.movie.Movie;
+
+public class RentalManager {
+    public static void main(String[] args) {
+        Customer customer = new Customer("Hong");
+
+        customer.addRental(new Rental(new Movie("Inception", Movie.REGULAR), 3));
+        customer.addRental(new Rental(new Movie("Oppenheimer", Movie.NEW_RELEASE), 2));
+        customer.addRental(new Rental(new Movie("Frozen", Movie.CHILDREN), 4));
+
+        System.out.println(customer.statement());
+    }
+}
+```
+
+---
+
+## 🧾 Commit message (chuẩn Clean Code style)
+
+```
+refactor: replace conditional with polymorphism and add PriceFactory
+
+- Introduced PriceFactory to encapsulate Price creation logic
+- Removed switch-case from Movie; Movie now delegates to PriceFactory
+- Added abstract Price and subclasses (Regular, NewRelease, Children)
+- Simplified Customer.statement() to use delegation through Rental
+- Improved code extensibility and adherence to Open/Closed Principle
+```
+
+---
+
+## ✅ Kết quả sau Commit 3 (với Factory)
+
+| Trước                                   | Sau                                                              |
+| --------------------------------------- | ---------------------------------------------------------------- |
+| `Movie` chứa `switch-case` để tạo Price | `Movie` dùng `PriceFactory.create()`                             |
+| Thêm loại phim → sửa `Movie`            | Thêm loại phim → chỉ thêm subclass + 1 dòng trong `PriceFactory` |
+| Coupling cao                            | Coupling thấp, dễ test                                           |
+| Vi phạm OCP                             | Tuân thủ OCP, SRP, DIP                                           |
+
+---
+
+👉 **Kết luận:**
+
+* Thêm **Factory trong Commit 3** là lựa chọn đúng và chuyên nghiệp nhất.
+* Nó giúp bạn refactor triệt để, đạt **Clean Architecture** sớm, và chuẩn bị sẵn nền tảng cho commit 4 (thêm Bestseller) cực dễ.
+
+---
+
+Bạn có muốn mình gửi **Commit 4 + 5 version sau này (Bestseller + HTML Template)** đã cập nhật để tương thích với Factory luôn không (tức là dùng `PriceFactory` và `StatementFactory`)?
+Nó sẽ thành bản hoàn chỉnh nhất — bạn có thể push GitHub trực tiếp.
