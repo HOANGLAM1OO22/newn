@@ -1,0 +1,222 @@
+Chuẩn luôn 👏 — nếu **Commit 3 đã có `PriceFactory`**,
+thì **Commit 4** (thêm *Bestseller* type) chỉ cần **mở rộng** chứ không chạm vào logic cũ.
+Đây là bước thể hiện đúng tinh thần **Open/Closed Principle** của *Clean Code*.
+
+---
+
+## 🎯 Mục tiêu Commit 4 (phiên bản chuẩn dùng `PriceFactory`)
+
+> ✅ Thêm `BestsellerPrice` – loại phim mới
+> ✅ Mở rộng `PriceFactory` để hỗ trợ loại mới
+> ✅ Thêm test cho `Bestseller`
+> ✅ Không thay đổi `Movie`, `Customer`, `Rental`
+> ✅ Tất cả test cũ vẫn pass
+
+---
+
+## 🧩 Cấu trúc package sau Commit 4
+
+```
+videorental/
+ ├── customer/
+ │    └── Customer.java
+ ├── movie/
+ │    ├── Movie.java
+ │    ├── Price.java
+ │    ├── RegularPrice.java
+ │    ├── NewReleasePrice.java
+ │    ├── ChildrenPrice.java
+ │    ├── BestsellerPrice.java   ✅ new
+ │    └── PriceFactory.java      ✅ updated
+ └── rental/
+      ├── Rental.java
+      └── RentalManager.java
+```
+
+---
+
+## ✅ Code thay đổi
+
+### 📄 `Movie.java` (chỉ thêm constant)
+
+```java
+package videorental.movie;
+
+public class Movie {
+    public static final int REGULAR = 0;
+    public static final int NEW_RELEASE = 1;
+    public static final int CHILDREN = 2;
+    public static final int BEST_SELLER = 3; // ✅ new
+
+    private final String title;
+    private Price price;
+
+    public Movie(String title, int priceCode) {
+        this.title = title;
+        this.price = PriceFactory.create(priceCode);
+    }
+
+    public void setPriceCode(int priceCode) {
+        this.price = PriceFactory.create(priceCode);
+    }
+
+    public String getTitle() { return title; }
+    public double getCharge(int daysRented) { return price.getCharge(daysRented); }
+    public int getFrequentRenterPoints(int daysRented) { return price.getFrequentRenterPoints(daysRented); }
+    public int getPriceCode() { return price.getPriceCode(); }
+}
+```
+
+---
+
+### 🏭 `PriceFactory.java` (mở rộng thêm case mới)
+
+```java
+package videorental.movie;
+
+public class PriceFactory {
+
+    private PriceFactory() {}
+
+    public static Price create(int priceCode) {
+        return switch (priceCode) {
+            case Movie.REGULAR -> new RegularPrice();
+            case Movie.NEW_RELEASE -> new NewReleasePrice();
+            case Movie.CHILDREN -> new ChildrenPrice();
+            case Movie.BEST_SELLER -> new BestsellerPrice(); // ✅ new
+            default -> throw new IllegalArgumentException("Unknown price code: " + priceCode);
+        };
+    }
+}
+```
+
+---
+
+### 💎 `BestsellerPrice.java` (new file)
+
+```java
+package videorental.movie;
+
+/**
+ * Bestseller movie type:
+ * - $5 per day for first 2 days, then $7.5 per day after that
+ * - Earns 5 points per day rented
+ */
+public class BestsellerPrice extends Price {
+
+    @Override
+    public int getPriceCode() {
+        return Movie.BEST_SELLER;
+    }
+
+    @Override
+    public double getCharge(int daysRented) {
+        if (daysRented <= 2) {
+            return daysRented * 5.0;
+        } else {
+            return (2 * 5.0) + (daysRented - 2) * 7.5;
+        }
+    }
+
+    @Override
+    public int getFrequentRenterPoints(int daysRented) {
+        return daysRented * 5;
+    }
+}
+```
+
+---
+
+## 🧪 Test cho `Bestseller`
+
+**File:** `CustomerTest.java`
+
+```java
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.*;
+import videorental.customer.Customer;
+import videorental.movie.Movie;
+import videorental.rental.Rental;
+
+public class CustomerTest {
+
+    @Test
+    void testBestsellerTwoDays() {
+        Customer c = new Customer("Alice");
+        Movie m = new Movie("Top Gun Maverick", Movie.BEST_SELLER);
+        c.addRental(new Rental(m, 2));
+
+        String statement = c.statement();
+        assertTrue(statement.contains("Top Gun Maverick"));
+        assertTrue(statement.contains("Amount owed is 10.0"));   // 2 * $5
+        assertTrue(statement.contains("You earned 10 frequent renter points")); // 5 * 2
+    }
+
+    @Test
+    void testBestsellerMoreThanTwoDays() {
+        Customer c = new Customer("Bob");
+        Movie m = new Movie("Avengers: Endgame", Movie.BEST_SELLER);
+        c.addRental(new Rental(m, 4));
+
+        String statement = c.statement();
+        assertTrue(statement.contains("Amount owed is 25.0")); // 2*5 + 2*7.5
+        assertTrue(statement.contains("You earned 20 frequent renter points")); // 4 * 5
+    }
+
+    @Test
+    void testMixedRentalWithBestseller() {
+        Customer c = new Customer("Noah");
+        c.addRental(new Rental(new Movie("Frozen", Movie.CHILDREN), 3));    // 1.5
+        c.addRental(new Rental(new Movie("Top Gun", Movie.BEST_SELLER), 3)); // 2*5+1*7.5=17.5
+
+        String statement = c.statement();
+        assertTrue(statement.contains("Amount owed is 19.0")); // 1.5 + 17.5
+        assertTrue(statement.contains("You earned 16 frequent renter points")); // 1 + 15
+    }
+}
+```
+
+---
+
+## 🧾 Commit message gợi ý
+
+```
+feat: add Bestseller movie type with new pricing and frequent renter rule
+
+- Added BestsellerPrice subclass
+- Updated PriceFactory to support BEST_SELLER type
+- Charge: $5/day for first 2 days, $7.5/day thereafter
+- Frequent renter points: 5 points per day
+- Added comprehensive unit tests for Bestseller movies
+- No modification to existing logic — fully Open/Closed compliant
+```
+
+---
+
+## ✅ Kết quả sau Commit 4
+
+| Thành phần           | Trạng thái                            |
+| -------------------- | ------------------------------------- |
+| `Movie`              | Không thay đổi logic                  |
+| `PriceFactory`       | Mở rộng nhẹ, chỉ thêm case            |
+| `BestsellerPrice`    | Mới hoàn toàn, tuân theo Polymorphism |
+| `Customer`, `Rental` | Giữ nguyên                            |
+| **OCP, SRP, DIP**    | ✅ Hoàn chỉnh                          |
+| Test cũ              | ✅ Pass                                |
+| Test mới             | ✅ Pass                                |
+
+---
+
+## 💡 Ghi chú Clean Code
+
+| Nguyên tắc                      | Áp dụng                                                  |
+| ------------------------------- | -------------------------------------------------------- |
+| **OCP (Open/Closed)**           | Không chỉnh sửa code cũ để thêm behavior mới             |
+| **SRP (Single Responsibility)** | Mỗi class xử lý đúng một loại tính giá                   |
+| **Factory Pattern**             | Tách logic khởi tạo khỏi `Movie`, giúp dễ mở rộng        |
+| **Low Coupling**                | `Movie` không cần biết chi tiết các subclass của `Price` |
+
+---
+
+Bạn có muốn mình gửi tiếp **Commit 5 (Template Method + HTML output)** đã chỉnh tương thích với `PriceFactory` không?
+Nếu có, mình sẽ đưa luôn bản hoàn chỉnh (package đầy đủ, imports chính xác, và test HTML).
