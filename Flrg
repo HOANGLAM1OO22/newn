@@ -1,0 +1,130 @@
+Rất hay — đây chính là câu hỏi mà một **senior multimedia dev** thực sự phải hỏi 👏
+Và **có**, hoàn toàn có thể xảy ra trong pipeline của bạn, tùy theo timing của thread pool (`transcode`/`transfer`) và cách gọi `notifyComplete()` trong `MotionScrap`.
+
+---
+
+## 🎯 Phân tích chi tiết
+
+Hãy nhìn 2 nơi bạn đang gọi:
+
+```kotlin
+// (A) reportProgress()
+onProgressListener?.onProgress(blended)
+
+// (B) notifyComplete()
+if (success) onProgressListener?.onProgress(1.0f)
+```
+
+Và 2 thread chạy song song trong `executeTasks()`:
+
+```kotlin
+// Thread 1: transcodingTasks.forEach { videoTranscoder.process(it) ... }
+// Thread 2: while(targetTaskId < numTasks) { videoTransfer.writeTrack(...) ... }
+```
+
+* Hai thread này chạy **song song** trong cùng `ExecutorService`.
+* `notifyComplete(EXECUTE_COMPLETE)` được gọi **bên trong transfer-thread** khi task cuối cùng xong (trong `executeTasks()`).
+* Tuy nhiên, `reportProgress()` được gọi mỗi khi có `onEachFrameTransferred` hoặc `onEachFrameTranscoded`.
+
+⚠️ Nhưng vì `onEachFrameTransferred` được gửi qua **event callback** của `VideoTransfer` (khác thread), và `notifyComplete` gọi thẳng trong `executeTasks`,
+thì về mặt thời gian, **`notifyComplete(EXECUTE_COMPLETE)` có thể chạy trước callback cuối cùng của progress**, nhất là khi encoder vừa flush xong frame cuối cùng, transfer gọi complete gần như ngay lập tức.
+
+---
+
+## 🔍 Ví dụ thực tế
+
+Log có thể xuất hiện như sau:
+
+```
+[VideoTransfer] writeTrack last frame done
+[MotionScrap] notifyComplete: EXECUTE_COMPLETE
+[MotionScrap] onProgressListener -> 1.0f
+[VideoTranscoder] onEachFrameTransferred (frame 954/954)
+[MotionScrap] onProgressListener -> 0.999f
+```
+
+Kết quả:
+Progress về **0.999** **sau khi** complete — trông như “tụt lại 99.9% sau khi hoàn tất”.
+
+---
+
+## 💡 Cách fix đúng (synchronization-safe)
+
+Giải pháp là **đảm bảo onProgress(1.0f) luôn được phát cuối cùng**, và không thể bị “ghi đè” bởi các progress cũ đến trễ.
+
+### Cách 1 — Dùng flag “isCompleted”
+
+Thêm flag `isCompleted` để khóa các update progress sau khi COMPLETE:
+
+```kotlin
+private val isCompleted = AtomicBoolean(false)
+
+private fun reportProgress() {
+    if (isCompleted.get()) return // ✅ skip progress update after complete
+
+    val current = processedFrames.incrementAndGet()
+    val progress = progressMeasureStrategy.onFrameProcessed(current)
+    if (progress >= 0f) {
+        val transcodingProgress = transcodingProgressTracker
+            .runCatching {
+                val (p, t) = report()
+                if (t > 0) p.toFloat() / t else 0f
+            }.getOrDefault(0f)
+
+        val blended = (progress * 0.3f + transcodingProgress * 0.7f).coerceIn(0f, 0.999f)
+        onProgressListener?.onProgress(blended)
+    }
+}
+
+private fun notifyComplete(event: ExportEvent) {
+    try {
+        val success = event == ExportEvent.EXECUTE_COMPLETE
+        SLog.i(TAG, "notifyComplete: $event, success=$success")
+
+        if (success && isCompleted.compareAndSet(false, true)) {
+            // ✅ Only send 1.0f once, and lock future updates
+            onProgressListener?.onProgress(1.0f)
+        }
+        onCompleteListener?.invoke(success, event)
+    } catch (e: Exception) {
+        SLog.e(TAG, "onCompleteListener failed: $e")
+    }
+}
+```
+
+### Ưu điểm
+
+* Đảm bảo **progress không bao giờ giảm sau 100%**
+* Không cần đồng bộ thread phức tạp
+* Vẫn thread-safe vì dùng `AtomicBoolean`
+
+---
+
+### Cách 2 — Gộp xử lý trong Main/UI thread
+
+Nếu bạn có `Handler` hoặc `Executor` UI chính (ví dụ từ `Handler(Looper.getMainLooper())`),
+hãy post mọi progress/complete về cùng thread để đảm bảo thứ tự tuyệt đối:
+
+```kotlin
+mainHandler.post {
+    onProgressListener?.onProgress(1.0f)
+}
+```
+
+Nhưng trong code hiện tại bạn không thấy UI thread handle, nên **Cách 1** là tối ưu nhất.
+
+---
+
+## ✅ Kết luận
+
+**Có thể xảy ra** tình huống `notifyComplete()` đến trước `onProgress(1f)` → dẫn đến tụt progress.
+**Cách fix chính xác:**
+
+* Thêm `AtomicBoolean isCompleted`
+* Trong `reportProgress()`: bỏ qua nếu đã complete
+* Trong `notifyComplete()`: set flag và emit `1.0f` đúng 1 lần.
+
+---
+
+Bạn có muốn tôi chèn đầy đủ đoạn code hoàn chỉnh đã fix phần này (AtomicBoolean + comment giải thích) vào file `MotionScrap.kt` không?
+Tôi có thể đưa nguyên block đã tinh chỉnh sẵn.
