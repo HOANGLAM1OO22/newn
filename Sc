@@ -1,0 +1,98 @@
+package com.samsung.motionphoto
+
+import android.util.Log
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import com.samsung.android.motionphoto.MotionScrap
+import com.samsung.android.motionphoto.Result
+import org.junit.After
+import org.junit.Before
+import org.junit.Test
+import org.junit.runner.RunWith
+import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
+
+@RunWith(AndroidJUnit4::class)
+class MotionScrapMergeTest {
+
+    private val TAG = "MotionScrapMergeTest"
+    private lateinit var context: android.content.Context
+    private lateinit var outputFile: File
+    private lateinit var motionScrap: MotionScrap
+
+    @Before
+    fun setup() {
+        context = InstrumentationRegistry.getInstrumentation().targetContext
+        outputFile = File(context.cacheDir, "merged_output.mp4")
+        if (outputFile.exists()) outputFile.delete()
+    }
+
+    @After
+    fun tearDown() {
+        if (::motionScrap.isInitialized) {
+            motionScrap.close()
+        }
+        if (outputFile.exists()) {
+            outputFile.delete()
+        }
+    }
+
+    @Test
+    fun testMergeMultipleMotionPhotos() {
+        // 🧩 1. Prepare input files (these should exist in device test assets)
+        val testDir = File(context.getExternalFilesDir(null), "motionphotos")
+        val inputs = listOf(
+            File(testDir, "clip_001.jpg").absolutePath,
+            File(testDir, "clip_002.jpg").absolutePath,
+            File(testDir, "clip_003.jpg").absolutePath
+        )
+
+        // Validate existence
+        inputs.forEach {
+            require(File(it).exists()) { "Missing test input: $it" }
+        }
+
+        // 🧩 2. Prepare callbacks
+        val completed = AtomicBoolean(false)
+        val success = AtomicBoolean(false)
+        val lastProgress = AtomicReference(0f)
+        val latch = CountDownLatch(1)
+
+        // 🧩 3. Build MotionScrap instance (like MergeVideoClips)
+        motionScrap = MotionScrap.Builder()
+            .setOnProgressListener { progress ->
+                lastProgress.set(progress)
+                Log.d(TAG, "progress=${progress * 100}%")
+            }
+            .setOnCompleteListener { isSuccess, event ->
+                Log.i(TAG, "onComplete: success=$isSuccess, event=$event")
+                success.set(isSuccess)
+                completed.set(true)
+                latch.countDown()
+            }
+            .build()
+
+        // 🧩 4. Execute merge
+        val future = motionScrap.export(inputs, outputFile.absolutePath)
+        Log.d(TAG, "Started merging: ${inputs.size} files -> ${outputFile.name}")
+
+        // 🧩 5. Wait for completion (max 60 sec)
+        val finished = latch.await(60, TimeUnit.SECONDS)
+        Log.d(TAG, "Merge finished=$finished, success=${success.get()}")
+
+        // 🧩 6. Assert result
+        assert(finished) { "Merge did not complete within timeout" }
+        assert(success.get()) { "Merge failed according to callback" }
+        assert(outputFile.exists() && outputFile.length() > 0) { "Output file not created" }
+
+        // Optionally verify progress reached 100%
+        assert(lastProgress.get() >= 0.99f) { "Progress never reached 100%" }
+
+        // 🧩 7. (Optional) read Result if needed
+        val result: Result = future.get(5, TimeUnit.SECONDS)
+        Log.d(TAG, "Result: status=${result.status}, duration=${result.transferTimeMs}ms")
+    }
+}
