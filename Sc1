@@ -1,0 +1,160 @@
+package com.sum.motionphoto;
+
+import static org.junit.Assert.*;
+
+import android.content.Context;
+import android.media.MediaFormat;
+import android.os.Environment;
+import android.util.Log;
+
+import androidx.test.core.app.ApplicationProvider;
+import androidx.test.ext.junit.runners.AndroidJUnit4;
+
+import org.junit.Before;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+
+import java.io.File;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
+
+/**
+ * Instrumented test for MotionScrap in Java
+ * Simulates Gallery’s MergeVideoClips integration style.
+ */
+@RunWith(AndroidJUnit4.class)
+public class MotionScrapJavaTest {
+
+    private static final String TAG = "MotionScrapJavaTest";
+
+    private Context context;
+    private File outputFile;
+    private final List<String> sourcePaths = new ArrayList<>();
+
+    private volatile float lastProgress = 0f;
+    private volatile boolean success = false;
+
+    private CountDownLatch latch;
+
+    @Before
+    public void setup() {
+        context = ApplicationProvider.getApplicationContext();
+        File downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+        outputFile = new File(downloadDir, "scrap_test.mp4");
+
+        // Motion photo sample files (replace with test assets)
+        File inputDir = new File(downloadDir, "motion_samples");
+        File[] samples = inputDir.listFiles((dir, name) -> name.endsWith(".jpg") || name.endsWith(".heic"));
+        assertNotNull("motion_samples folder not found", samples);
+        assertTrue("No motion photo files found in motion_samples/", samples.length > 0);
+
+        for (File file : samples) {
+            sourcePaths.add(file.getAbsolutePath());
+        }
+
+        latch = new CountDownLatch(1);
+    }
+
+    @Test
+    public void testMergeVideoClipsIntegration() throws Exception {
+        Log.i(TAG, "Start MotionScrap integration test");
+
+        MergeVideoClips job = new MergeVideoClips(sourcePaths, outputFile.getAbsolutePath())
+                .setProgressListener(new Consumer<Float>() {
+                    @Override
+                    public void accept(Float progress) {
+                        lastProgress = progress;
+                        Log.i(TAG, String.format("Progress: %.1f%%", progress * 100));
+                    }
+                })
+                .setCompleteListener(successVal -> {
+                    success = successVal;
+                    Log.i(TAG, "onCompleted: success=" + success);
+                    latch.countDown();
+                });
+
+        job.merge(); // Run asynchronously
+
+        boolean finished = latch.await(90, TimeUnit.SECONDS);
+        assertTrue("Timeout waiting for merge to complete", finished);
+
+        assertTrue("Merge failed", success);
+        assertTrue("Output file not created", outputFile.exists());
+        assertTrue("Output file too small", outputFile.length() > 0);
+
+        Log.i(TAG, "✅ Merge complete: " + outputFile.getAbsolutePath());
+        job.release(); // cleanup resources
+    }
+
+    /**
+     * Minimal inline version of MergeVideoClips used for testing.
+     * Matches Gallery team’s logic.
+     */
+    private static class MergeVideoClips {
+        private final List<String> paths;
+        private final String outPath;
+        private Consumer<Float> onProgress;
+        private Consumer<Boolean> onCompleted;
+        private MotionScrap motionScrap;
+        private Future<Result> future;
+
+        MergeVideoClips(List<String> paths, String outPath) {
+            this.paths = paths;
+            this.outPath = outPath;
+        }
+
+        MergeVideoClips setProgressListener(Consumer<Float> progress) {
+            this.onProgress = progress;
+            return this;
+        }
+
+        MergeVideoClips setCompleteListener(Consumer<Boolean> complete) {
+            this.onCompleted = complete;
+            return this;
+        }
+
+        MergeVideoClips merge() {
+            try {
+                motionScrap = new MotionScrap.Builder()
+                        .setOnProgressListener(onProgress)
+                        .setOnCompleteListener((success, event) -> {
+                            Log.i(TAG, "onComplete event=" + event + ", success=" + success);
+                            if (onCompleted != null) onCompleted.accept(success);
+                            release();
+                        })
+                        .build();
+
+                future = motionScrap.export(paths, outPath);
+                Log.i(TAG, "merge() started with " + paths.size() + " clips");
+            } catch (Exception e) {
+                Log.e(TAG, "merge() exception: " + e.getMessage(), e);
+                cancel();
+            }
+            return this;
+        }
+
+        void cancel() {
+            try {
+                if (future != null) future.cancel(true);
+                if (motionScrap != null) motionScrap.close();
+            } catch (Exception e) {
+                Log.e(TAG, "cancel() failed", e);
+            }
+        }
+
+        void release() {
+            try {
+                if (motionScrap != null) {
+                    motionScrap.close();
+                    motionScrap = null;
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "release() failed", e);
+            }
+        }
+    }
+}
